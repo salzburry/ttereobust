@@ -22,14 +22,19 @@
 ## Double robustness: consistent if EITHER the propensity score model OR the
 ## outcome model is correctly specified (but not necessarily both).
 ##
-## This is NOT the same as DR Standardisation in analysis.R:
-##   - DR Stand uses a WEIGHTED outcome model (IPTW applied to the GLM)
-##     with a cloglog link, which is non-canonical and is NOT doubly robust
-##     (Gabriel et al. 2024, Stat Med; Denz et al. 2023, Stat Med).
-##   - AIPTW uses an UNWEIGHTED outcome model; the IPW enters only through
-##     the explicit augmentation term. With a canonical logit link the two
-##     are algebraically equivalent (Gabriel et al. 2024), but the explicit
-##     formula here makes the double-robustness mechanism transparent.
+## Relationship to DR Standardisation:
+##   The Methods Summary defines "Doubly Robust Standardisation" as the
+##   discrete-time weighted-outcome approach with a LOGIT (canonical) link.
+##   That approach IS doubly robust and is algebraically equivalent to AIPTW
+##   in the canonical-link setting (Gabriel et al. 2024). This script
+##   implements the explicit augmentation form for transparency.
+##
+##   What is NOT doubly robust is the IPTW + Regression Standardisation
+##   block currently in analysis.R — specifically the weighted cloglog /
+##   weighted Cox / weighted FPM implementations. Gabriel et al. (2024) and
+##   Denz et al. (2023) show that a cloglog or Cox-based weighted
+##   regression-standardisation estimator does not guarantee double
+##   robustness, and that block is therefore not labelled AIPTW here.
 ##
 ## Outcome model family note:
 ##   This implementation uses a logit-link PLR as the working outcome model.
@@ -81,9 +86,8 @@ simN <- 2500   # N per protocol Section 6.2
 # source("get_params_delayed.R")
 source("get_params_ph.R")
 
-rescale_time <- 1/4                      # quarter-year discrete intervals
-t.eval       <- seq(0, admin.cens, 0.1)  # fine evaluation grid
-t.perf       <- c(1, 5, 10)             # protocol performance time points
+rescale_time <- 1/4    # quarter-year discrete intervals
+t.perf       <- c(1, 5, 10)   # protocol performance time points
 
 # Discrete-time interval setup.
 # interval_ends: right endpoints of each interval  → 0.25, 0.50, ..., 10
@@ -96,6 +100,16 @@ interval_mapping <- data.frame(
   time_period = seq_along(interval_ends),
   time        = interval_ends
 )
+
+# Two evaluation grids:
+#   t.eval  — AIPTW estimator grid: interval end-points only (0, 0.25, ..., 10).
+#             The discrete-time estimator is only defined at these points;
+#             evaluating at arbitrary times (e.g. t=0.1) causes an empty
+#             which(interval_mapping$time <= t) and breaks the tp lookup.
+#   t.truth — fine grid (0.1-year steps) used solely for the analytic Weibull
+#             truth curve and for the smooth background of plotting.
+t.eval  <- c(0, interval_ends)
+t.truth <- seq(0, admin.cens, 0.1)
 
 
 # ---- Propensity score model specifications -----------------------------------
@@ -127,6 +141,9 @@ out.specs <- c(
 # Every scenario changes exactly ONE nuisance model.
 
 scenarios <- list(
+
+  # --- Main protocol scenarios (Methods Summary Section 6.4) ----------------
+  # One nuisance model misspecified at a time.
   both_cvs_correct = list(ps = "correct",  out = "correct",
                            label = "Both covariate sets correct"),
   miss_W_ps_only   = list(ps = "no_W",     out = "correct",
@@ -137,10 +154,14 @@ scenarios <- list(
                            label = "Outcome: wrong form"),
   wrong_ff_ps      = list(ps = "wrong_ff", out = "correct",
                            label = "PS: wrong form"),
+
+  # --- Exploratory / sensitivity scenarios (not in main protocol grid) -------
+  # Included to probe behaviour under severe misspecification but not part of
+  # the formal performance comparison described in the Methods Summary.
   heavy_ps         = list(ps = "heavy",    out = "correct",
-                           label = "PS: heavy misspec"),
+                           label = "PS: heavy misspec [sensitivity]"),
   heavy_out        = list(ps = "correct",  out = "heavy",
-                           label = "Outcome: heavy misspec")
+                           label = "Outcome: heavy misspec [sensitivity]")
 )
 
 
@@ -171,15 +192,15 @@ lin_pred_base <- as.vector(
   coeff.W * cov.mat[, "W"]
 )
 
-surv1_wei <- sapply(t.eval, function(t)
+surv1_wei <- sapply(t.truth, function(t)
   mean(exp(-lambda.tte * t^gamma.tte * exp(coeff.A + lin_pred_base))))
-surv0_wei <- sapply(t.eval, function(t)
+surv0_wei <- sapply(t.truth, function(t)
   mean(exp(-lambda.tte * t^gamma.tte * exp(lin_pred_base))))
 rd_wei    <- surv1_wei - surv0_wei
 
 true.surv.df <- data.frame(
-  time   = rep(t.eval, 2),
-  A      = rep(c(0L, 1L), each = length(t.eval)),
+  time   = rep(t.truth, 2),
+  A      = rep(c(0L, 1L), each = length(t.truth)),
   surv   = c(surv0_wei, surv1_wei),
   method = "True Weibull"
 )
@@ -355,7 +376,8 @@ run_aiptw_discrete <- function(ps.spec.str, out.spec.str,
 # ---- Performance reporting ---------------------------------------------------
 
 report_performance <- function(result, true_S0, true_S1, rd_wei,
-                                t.eval, t.perf = c(1, 5, 10)) {
+                                t.truth, t.perf = c(1, 5, 10)) {
+  # t.truth: fine-grid vector on which true_S0/true_S1/rd_wei are defined
 
   lbl <- unique(result$surv$method)
   cat("\n", lbl, "\n", strrep("-", nchar(lbl)), "\n", sep = "")
@@ -365,14 +387,14 @@ report_performance <- function(result, true_S0, true_S1, rd_wei,
     for (a in c(0L, 1L)) {
       sub      <- dplyr::filter(result$surv, A == a)
       idx_est  <- which.min(abs(sub$time - t_pt))
-      idx_true <- which.min(abs(t.eval - t_pt))
+      idx_true <- which.min(abs(t.truth - t_pt))
       est      <- sub$surv[idx_est]
       truth    <- if (a == 0L) true_S0[idx_true] else true_S1[idx_true]
       cat(sprintf("  %-4g  A=%d  %-8.4f  %-8.4f  %+.2f%%\n",
                   t_pt, a, est, truth, 100 * (est - truth) / truth))
     }
     rd_sub  <- result$rd[which.min(abs(result$rd$time - t_pt)), ]
-    rd_true <- rd_wei[which.min(abs(t.eval - t_pt))]
+    rd_true <- rd_wei[which.min(abs(t.truth - t_pt))]
     cat(sprintf("        RD    %-8.4f  %-8.4f\n", rd_sub$RD, rd_true))
   }
 }
@@ -403,7 +425,7 @@ names(all.results) <- names(scenarios)
 
 invisible(lapply(all.results, report_performance,
                  true_S0 = surv0_wei, true_S1 = surv1_wei,
-                 rd_wei  = rd_wei,    t.eval  = t.eval))
+                 rd_wei  = rd_wei,    t.truth = t.truth))
 
 
 # ==============================================================================
@@ -471,7 +493,7 @@ rd.perf.df <- bind_rows(lapply(names(all.results), function(sc_name) {
 
 true.rd.df <- data.frame(
   time    = t.perf,
-  true_RD = rd_wei[sapply(t.perf, function(t) which.min(abs(t.eval - t)))],
+  true_RD = rd_wei[sapply(t.perf, function(t) which.min(abs(t.truth - t)))],
   t_label = factor(paste("t =", t.perf), levels = paste("t =", t.perf))
 )
 
