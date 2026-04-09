@@ -27,7 +27,7 @@ outcome.covs <- c("A + L1sq + L2sq + L3 + L4 + L5 + L6 + O + W",
 outcome.covs.sceN <- length(outcome.covs)
  
 # Simulate data - set params for analysis data
-simN = 10000
+simN = 2500   # N per protocol Section 6.2
  
 #source("get_params_waning.R")
 #source("get_params_delayed.R")
@@ -129,10 +129,13 @@ sim.df <- sim_surv_data(seed = this.seed,
 surv.df <- sim.df$data %>%
   mutate(A_fct = as.factor(A))
  
-# get model formula
-cov.index <- 1
- 
-iptw.formula <- paste("A", exposure.covs[cov.index], sep = " ~ ")
+# Separate indices for propensity score and outcome model.
+# Using one shared index (as previously) changes BOTH models together and does
+# not represent the protocol's "misspecify one model only" scenarios.
+ps.index  <- 1   # index into exposure.covs: 1=correct, 2=no W, 3=wrong form, 4=heavy
+out.index <- 1   # index into outcome.covs:  1=correct, 2=no O/W, 3=wrong form, 4=heavy
+
+iptw.formula <- paste("A", exposure.covs[ps.index], sep = " ~ ")
  
 ## ------ Singly Robust Methods:
  
@@ -245,12 +248,12 @@ ggplot() +
  
 ## Regression Standardisation / simple G-computation analysis ##
 surv.formula <- "Surv(eventtime, event)"
-surv.model.formula <- paste(surv.formula, outcome.covs[cov.index], sep = " ~ ")
-glm.model.formula <- paste0("event ~ ", outcome.covs[cov.index], " + as.factor(time_period)")
+surv.model.formula <- paste(surv.formula, outcome.covs[out.index], sep = " ~ ")
+glm.model.formula <- paste0("event ~ ", outcome.covs[out.index], " + as.factor(time_period)")
 fpm.model.formula <- paste(surv.model.formula, "gamma1(A)", sep = " + ") # add NPH for A
  
 # For the cox model, make use of adjustedCurves(). Alternatively can use riskRegression::ate()
-cond.cox <- coxph(as.formula(gsub(\bA\b, "A_fct", surv.model.formula)), # use the factor var for A
+cond.cox <- coxph(as.formula(gsub("\\bA\\b", "A_fct", surv.model.formula)), # use the factor var for A
                   data = surv.df,
                   ties = "breslow",
                   id = id,
@@ -354,7 +357,7 @@ ggplot() +
 ## ------ Doubly Robust Standardisation:
  
 # For the cox model, make use of adjustedCurves(). Alternatively can use riskRegression::ate()
-cond.wtcox <- coxph(as.formula(gsub(\bA\b, "A_fct", surv.model.formula)), # use the factor var for A
+cond.wtcox <- coxph(as.formula(gsub("\\bA\\b", "A_fct", surv.model.formula)), # use the factor var for A
                   data = survwt.df,
                   weights = ipw.s,
                   ties = "breslow",
