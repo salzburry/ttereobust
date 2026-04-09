@@ -439,19 +439,19 @@ sc_colours <- c(
   "AIPTW (Outcome: missing O)"           = "#FC8D59",
   "AIPTW (Outcome: wrong form)"          = "#91BFDB",
   "AIPTW (PS: wrong form)"               = "#4575B4",
-  "AIPTW (PS: heavy misspec)"            = "#762A83",
-  "AIPTW (Outcome: heavy misspec)"       = "#E7298A"
+  "AIPTW (PS: heavy misspec [sensitivity])"       = "#762A83",
+  "AIPTW (Outcome: heavy misspec [sensitivity])" = "#E7298A"
 )
 
 sc_linetypes <- c(
-  "True Weibull"                         = "solid",
-  "AIPTW (Both covariate sets correct)"  = "solid",
-  "AIPTW (PS: missing W)"                = "dashed",
-  "AIPTW (Outcome: missing O)"           = "dashed",
-  "AIPTW (Outcome: wrong form)"          = "dotdash",
-  "AIPTW (PS: wrong form)"               = "dotdash",
-  "AIPTW (PS: heavy misspec)"            = "dotted",
-  "AIPTW (Outcome: heavy misspec)"       = "dotted"
+  "True Weibull"                                  = "solid",
+  "AIPTW (Both covariate sets correct)"           = "solid",
+  "AIPTW (PS: missing W)"                         = "dashed",
+  "AIPTW (Outcome: missing O)"                    = "dashed",
+  "AIPTW (Outcome: wrong form)"                   = "dotdash",
+  "AIPTW (PS: wrong form)"                        = "dotdash",
+  "AIPTW (PS: heavy misspec [sensitivity])"       = "dotted",
+  "AIPTW (Outcome: heavy misspec [sensitivity])"  = "dotted"
 )
 
 plot.surv.df <- bind_rows(
