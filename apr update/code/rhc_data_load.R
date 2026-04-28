@@ -109,7 +109,7 @@ rhc <- read.csv(paste0(wd,"/data/rhc.csv")) %>%
     swang1 = as.numeric(swang1 == "RHC"),   # 1 indicates RHC was given, 0 means NO RHC
    
     ## time from admission to death
-    t2dth = lubridate::time_length(dthdte - sadmdte,  = "year"),
+    t2dth = lubridate::time_length(dthdte - sadmdte, unit = "year"),
    
     ## time from last contact to death
     t2lstct = lubridate::time_length(lstctdte - sadmdte, unit = "year"),
