@@ -19,6 +19,14 @@ sim_surv_data <- function(seed = 2026,
                           gen.truth = NA
                           ) {
 
+  # Reproducibility: if a non-NA seed is supplied, set RNG state so that the
+  # simulated dataset is fully determined by (seed, parameters). Pass seed = NA
+  # (or NULL) to inherit the ambient RNG state — useful when an outer driver
+  # is managing seeds across replications.
+  if (!is.null(seed) && !is.na(seed)) {
+    set.seed(seed)
+  }
+
   ## --- Simulate covs
   tot.Lcovs <- Lcovs.linear + Lcovs.sq
   Ncovs <- tot.Lcovs + 2

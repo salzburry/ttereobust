@@ -373,17 +373,21 @@ run_aiptw_discrete <- function(ps.spec.str, out.spec.str,
     surv0 <- mean(Q0 + ipw_ind0 * (Y_ipcw - Q0))
     surv1 <- mean(Q1 + ipw_ind1 * (Y_ipcw - Q1))
 
+    # Store the RAW AIPTW estimate. Clipping to [0, 1] is done only for
+    # plotting (see ggplot pipeline below). Performance metrics and RD use the
+    # raw values so finite-sample behaviour, coverage, and SE comparisons are
+    # not biased by saturation at the [0, 1] boundary.
     data.frame(
       time   = t,
       A      = c(0L, 1L),
-      surv   = pmin(pmax(c(surv0, surv1), 0), 1),
+      surv   = c(surv0, surv1),                              # raw (unclipped)
       method = method.label
     )
   })
 
   surv.result <- do.call(rbind, out.list)
 
-  # Risk difference RD(t) = S^1(t) - S^0(t)
+  # Risk difference RD(t) = S^1(t) - S^0(t) on the raw estimates.
   rd.result <- surv.result %>%
     pivot_wider(id_cols = time, names_from = A, values_from = surv,
                 names_prefix = "S") %>%
@@ -478,8 +482,13 @@ plot.surv.df <- bind_rows(
   true.surv.df,
   lapply(all.results, function(r) r$surv)
 ) %>%
-  mutate(A = factor(A, levels = c(0L, 1L),
-                    labels = c("Control (A=0)", "Treatment (A=1)")))
+  mutate(
+    # Display-only clipping. Raw values are preserved on result$surv and used
+    # for performance metrics; only the plot saturates at [0, 1].
+    surv = pmin(pmax(surv, 0), 1),
+    A    = factor(A, levels = c(0L, 1L),
+                  labels = c("Control (A=0)", "Treatment (A=1)"))
+  )
 
 ggplot(plot.surv.df,
        aes(x = time, y = surv, colour = method, linetype = method)) +
