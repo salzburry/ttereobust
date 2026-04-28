@@ -24,7 +24,7 @@ sim_surv_data <- function(seed = 2026,
   Ncovs <- tot.Lcovs + 2
 
   cov.mat <- mvrnorm(n = N, mu = mu, Sigma = sigma)
-  L.names <- lapply(c(1:tot.Lcovs), function(l){ paste0("L",l) }) %>% list_c
+  L.names <- paste0("L", seq_len(tot.Lcovs))   # base R, no purrr dependency
   dimnames(cov.mat) <- list(NULL, c(L.names, "W", "O"))
   cov.mat.L <- cov.mat[,1:(Lcovs.linear+Lcovs.sq)]
 
@@ -75,25 +75,25 @@ sim_surv_data <- function(seed = 2026,
   )
 
 
-  # simulate time from a weibull distribution
-  X <- (-log(u.t)/weihaz.denom)^(1/gamma)
+  # simulate time from a weibull distribution.
+  # Tiny jitter is applied to the raw event/censoring times BEFORE the pmin with
+  # admin.cens so the administrative boundary at maxT is preserved exactly. If
+  # we jitter T.obs after pmin, admin-censored individuals can be pushed past
+  # admin.cens and then mis-counted as still-at-risk by the >= IPCW outcome.
+  X <- (-log(u.t)/weihaz.denom)^(1/gamma) + runif(N, 0, 1) / 1000
 
-  C <- rexp(N, cens_lambda)
+  C <- rexp(N, cens_lambda) + runif(N, 0, 1) / 1000
 
   T.obs <- pmin(X, C, maxT)
 
-  D.obs <- ifelse(pmin(X, C, maxT) == X,
-                  1,
-                  0
-  )
+  D.obs <- ifelse(T.obs == X, 1, 0)   # event flag preserved post-jitter
 
   covs.df <- as.data.frame(cov.mat) %>% mutate(id = row_number()) %>%
     mutate(L1sq = L1^2, L2sq = L2^2) # add non-linear effects
 
-  # The final simulate dataset
+  # The final simulated dataset
   surv.df <- data.frame(id=1:N, eventtime = T.obs, event = D.obs, A = A) %>%
-    left_join(., covs.df, by = c("id")) %>%
-    mutate(eventtime = eventtime + runif(n(), 0, 1) / 1000) # ensure no ties, so rescale eventtime
+    left_join(., covs.df, by = c("id"))
 
   return(list(data = surv.df, cov.mat = cov.mat))
   }

@@ -49,15 +49,22 @@
 ## Misspecification scenarios follow protocol Section 6.4:
 ##   Each scenario isolates misspecification in ONE nuisance model only.
 ##
-## DGM note on W and O:
-##   To preserve comparability with analysis.R / gen_truth.R, the truth
-##   formula here follows those files exactly: both W and O enter the
-##   outcome hazard (coeff.W != 0 and coeff.O != 0 in the linear predictor).
-##   The distinction used in the misspecification scenarios is that O cannot
-##   appear in the PS model (it is not used for treatment assignment) while
-##   W can appear in both, consistent with the truth formula.
-##   The get_params comment "coeff.W will only appear in exposure model" is
-##   inconsistent with the truth code and is flagged for future resolution.
+## DGM note on W and O (resolved):
+##   By design (utils/sim_data.R as of Apr 28 update), W enters BOTH the
+##   exposure logit and the outcome hazard, while O enters the outcome hazard
+##   only. The misspecification scenarios are defined accordingly:
+##     - PS model can contain L1..L6 and W (not O)
+##     - Outcome model can contain A, L1..L6 (linear and quadratic forms),
+##       O, and W
+##   "missing W in PS only" therefore drops a true confounder of treatment
+##   while leaving the outcome model fully specified, isolating PS-side
+##   misspecification for the DR check.
+##
+## Truth covariate forms in the outcome hazard:
+##   The hazard linear predictor is linear in L1..L6 AND quadratic in L1, L2.
+##   The "correct" outcome spec below therefore must include BOTH raw L1, L2
+##   AND L1sq, L2sq. The exposure logit is linear in L1..L6 only, so the
+##   "correct" PS spec uses raw L1..L6 (no squared terms).
 ##
 ## References:
 ##   Bang & Robins (2005) Biometrics 61:962-973
@@ -116,24 +123,37 @@ t.truth <- seq(0, admin.cens, 0.1)
 # Kept separate from outcome model specs.  Sharing a single index (as in the
 # original analysis.R cov.index) prevents representing "misspecify one model
 # only" scenarios.
+#
+# Apr 28 DGM exposure model is LINEAR in L1..L6 plus W (sim_data.R lines 54-62).
+# Therefore the "correct" PS spec uses raw L1, L2, ..., L6 + W. The "wrong
+# functional form" spec replaces L1, L2 with L1sq, L2sq so it is genuinely
+# misspecified relative to the truth.
 
 ps.specs <- c(
-  correct  = "L1sq + L2sq + L3 + L4 + L5 + L6 + W",   # correct covariate set
-  no_W     = "L1sq + L2sq + L3 + L4 + L5 + L6",         # missing W
-  wrong_ff = "L1 + L2 + L3 + L4 + L5 + L6 + W",         # wrong functional form (L1,L2 linear)
-  heavy    = "L3 + L4 + L5"                               # heavy misspecification
+  correct  = "L1 + L2 + L3 + L4 + L5 + L6 + W",         # matches DGM exposure
+  no_W     = "L1 + L2 + L3 + L4 + L5 + L6",             # missing W only
+  wrong_ff = "L1sq + L2sq + L3 + L4 + L5 + L6 + W",     # quadratic L1,L2 (wrong form)
+  heavy    = "L3 + L4 + L5"                              # heavy misspecification
 )
 
 
 # ---- Outcome model specifications --------------------------------------------
-# Correct covariate set includes O and W consistent with the truth formula.
-# See DGM note in file header.
+# Apr 28 DGM outcome hazard linear predictor (sim_data.R lines 71-75) contains:
+#   coeff.A * A
+#   + coeff.L %*% (L1..L6)            <-- LINEAR L1..L6
+#   + coeff.Lsq[1:2] %*% (L1^2, L2^2) <-- QUADRATIC L1, L2
+#   + coeff.W * W
+#   + coeff.O * O
+# Therefore the "correct" outcome covariate set must include BOTH the linear
+# L1, L2 terms AND the quadratic L1sq, L2sq terms (in addition to L3..L6, O, W).
+# Previously this spec omitted the linear L1, L2, so neither "correct" nor
+# "wrong_ff" was the true outcome model — this is now fixed.
 
 out.specs <- c(
-  correct  = "A + L1sq + L2sq + L3 + L4 + L5 + L6 + O + W",
-  no_O     = "A + L1sq + L2sq + L3 + L4 + L5 + L6 + W",          # missing O
-  wrong_ff = "A + L1 + L2 + L3 + L4 + L5 + L6 + O + W",          # wrong functional form
-  heavy    = "A + L3 + L4 + L5"                                     # heavy misspecification
+  correct  = "A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + O + W",   # full truth
+  no_O     = "A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + W",       # missing O only
+  wrong_ff = "A + L1 + L2 + L3 + L4 + L5 + L6 + O + W",                 # drops quadratic
+  heavy    = "A + L3 + L4 + L5"                                          # heavy misspecification
 )
 
 
