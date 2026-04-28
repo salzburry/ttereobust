@@ -43,12 +43,17 @@ sim_surv_data <- function(seed = 2026,
   ## --- Define exposure model
   expit <- function(x) { exp(x) / (1 + exp(x)) }
 
+  # Exposure model — matches Apr 28 methods document Section 6.2:
+  #   logit P(A = 1) = -2 + 0.5*L1 + 0.4*L2 + (-0.6)*L3 + 0.4*L4 + 0.5*L5 + 0.3*L6 + W
+  # Coefficients are supplied via alpha.L (length 6, for L1..L6) and alpha.W.
+  # L1, L2 enter linearly here; the quadratic L1, L2 terms appear only in the
+  # outcome hazard (per the doc).
   if(!is.na(gen.truth)) {
     A <- gen.truth
   } else {
-    A <- rbinom(N, 1, expit(-1 +
-                              model.probA.L[1]*cov.mat[,"L1"]^2 +
-                              model.probA.L[2]*cov.mat[,"L2"]^2 +
+    A <- rbinom(N, 1, expit(-2 +
+                              model.probA.L[1]*cov.mat[,"L1"] +
+                              model.probA.L[2]*cov.mat[,"L2"] +
                               model.probA.L[3]*cov.mat[,"L3"] +
                               model.probA.L[4]*cov.mat[,"L4"] +
                               model.probA.L[5]*cov.mat[,"L5"] +
