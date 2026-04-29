@@ -196,7 +196,8 @@ run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
 ##     consolidated CSV absent) is correctly skipped by the aggregator until
 ##     the run completes.
 
-run_one_scenario <- function(scenario_row, dgm_params, opts) {
+run_one_scenario <- function(scenario_row, dgm_params, opts,
+                              truth_cache = new.env(parent = emptyenv())) {
 
   # Validate that admin.cens is an integer multiple of rescale_time. If
   # not, the discrete-time grid does not land on admin.cens and the
@@ -220,12 +221,22 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
   rep_dir <- file.path(RAW_DIR, scenario_row$scenario_id)
   dir.create(rep_dir, recursive = TRUE, showWarnings = FALSE)
 
-  # Truth (does not depend on rep seed)
-  truth <- compute_truth(
-    t_eval     = opts$t_eval,
-    dgm        = dgm_params,
-    truth_seed = opts$base_seed * 31L + 1L
-  )
+  # Truth depends on (dgm, rho_L) but NOT on the misspecification
+  # pattern, so cache by that key. Without caching, the 500k-row
+  # truth simulation runs five times per (dgm, rho) pair (once per
+  # misspec) which is wasted work.
+  truth_key <- paste(scenario_row$dgm, scenario_row$rho_L, sep = "__")
+  if (!exists(truth_key, envir = truth_cache, inherits = FALSE)) {
+    base_truth <- compute_truth(
+      t_eval     = opts$t_eval,
+      dgm        = dgm_params,
+      truth_seed = opts$base_seed * 31L + 1L
+    )
+    assign(truth_key, base_truth, envir = truth_cache)
+  }
+  truth <- get(truth_key, envir = truth_cache)
+  # Annotate per-scenario keys (truth values themselves are identical
+  # across misspec patterns within the same dgm/rho).
   truth$scenario_id <- scenario_row$scenario_id
   truth$dgm         <- scenario_row$dgm
   truth$misspec     <- scenario_row$misspec
@@ -362,7 +373,8 @@ main <- function() {
                   nrow(grid), opts$R, opts$B))
 
   # DGM params are per-DGM (not per-rho); cache to avoid re-sourcing
-  dgm_cache <- new.env(parent = emptyenv())
+  dgm_cache   <- new.env(parent = emptyenv())
+  truth_cache <- new.env(parent = emptyenv())   # keyed by "<dgm>__<rho_L>"
 
   # Config that affects raw output content. Stored beside each scenario
   # CSV as a .cfg sidecar so we can detect and refuse to mix runs from
@@ -390,6 +402,17 @@ main <- function() {
     # one (or --overwrite is set). Without this check, running the
     # README smoke test (R=50/B=50) and then the protocol grid
     # (R=1900/B=200) silently reuses smoke rows as protocol rows.
+    # Legacy checkpoint detection: outputs from a pre-.cfg run cannot
+    # have their config validated. Refuse to resume without --overwrite.
+    legacy_present <- (file.exists(raw_path) || dir.exists(rep_dir)) &&
+                      !file.exists(cfg_path)
+    if (legacy_present && !opts$overwrite) {
+      stop(sprintf(
+        "[%s] outputs exist from an older run with no .cfg sidecar; cannot validate config compatibility. Re-run with --overwrite or remove results/raw/%s* first.",
+        sc$scenario_id, sc$scenario_id
+      ))
+    }
+
     if (file.exists(cfg_path) && !opts$overwrite) {
       prev_cfg  <- dget(cfg_path)
       diff_keys <- names(current_cfg)[
@@ -433,7 +456,7 @@ main <- function() {
     message(sprintf("\n========== [%d/%d] %s ==========",
                     i, nrow(grid), sc$scenario_id))
 
-    res <- run_one_scenario(sc, dgm_params, opts)
+    res <- run_one_scenario(sc, dgm_params, opts, truth_cache)
 
     # Atomic consolidate. Order matters: the summariser uses the
     # presence of raw_path as the signal that a scenario is complete and
