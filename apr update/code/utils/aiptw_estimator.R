@@ -133,10 +133,24 @@ aiptw_estimate <- function(surv.df,
       data.frame(t = t, S0 = S0, S1 = S1, RD = S1 - S0)
     })
 
-    do.call(rbind, out)
+    out_df <- do.call(rbind, out)
+    out_df$status    <- "ok"
+    out_df$error_msg <- NA_character_
+    out_df
 
   }, error = function(e) {
-    data.frame(t = t_eval, S0 = NA_real_, S1 = NA_real_, RD = NA_real_)
+    # Surface the failure to the caller instead of silently returning NA.
+    # The replication driver and aggregator both inspect $status so a
+    # scenario's success rate can be reported separately from n_reps.
+    data.frame(
+      t         = t_eval,
+      S0        = NA_real_,
+      S1        = NA_real_,
+      RD        = NA_real_,
+      status    = "error",
+      error_msg = conditionMessage(e),
+      stringsAsFactors = FALSE
+    )
   })
 }
 
@@ -178,9 +192,10 @@ aiptw_bootstrap <- function(surv.df, ps_spec, out_spec,
   boot_long_df %>%
     dplyr::group_by(t, target) %>%
     dplyr::summarise(
-      se    = stats::sd(val, na.rm = TRUE),
-      ci_lo = stats::quantile(val, alpha,     na.rm = TRUE, names = FALSE),
-      ci_hi = stats::quantile(val, 1 - alpha, na.rm = TRUE, names = FALSE),
-      .groups = "drop"
+      n_boot_ok = sum(!is.na(val)),
+      se        = stats::sd(val, na.rm = TRUE),
+      ci_lo     = stats::quantile(val, alpha,     na.rm = TRUE, names = FALSE),
+      ci_hi     = stats::quantile(val, 1 - alpha, na.rm = TRUE, names = FALSE),
+      .groups   = "drop"
     )
 }
