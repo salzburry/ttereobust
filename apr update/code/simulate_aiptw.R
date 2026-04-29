@@ -59,17 +59,18 @@ source(file.path(CODE_DIR, "utils", "scenarios.R"))
 
 parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
   defaults <- list(
-    R         = 200L,            # replications per scenario
-    B         = 100L,            # bootstrap resamples per replicate
-    base_seed = 1000L,           # base seed; replicate r uses base_seed + r
-    N         = 2500L,           # protocol Section 6.2
-    t_eval    = c(1, 5, 10),     # protocol Section 6.3
-    dgm       = NULL,            # NULL = all
-    misspec   = NULL,            # NULL = all 5 main patterns
-    rho       = NULL,            # NULL = all (0, 0.25, 0.75)
+    R            = 200L,           # replications per scenario
+    B            = 100L,           # bootstrap resamples per replicate
+    base_seed    = 1000L,          # base seed; replicate r uses base_seed + r
+    N            = 2500L,          # protocol Section 6.2
+    t_eval       = c(1, 5, 10),    # protocol Section 6.3
+    rescale_time = 0.25,           # discrete-time interval width; smaller = more time-period dummies in PLR (slower fit, finer grid)
+    dgm          = NULL,           # NULL = all
+    misspec      = NULL,           # NULL = all 5 main patterns
+    rho          = NULL,           # NULL = all (0, 0.25, 0.75)
     include_heavy = FALSE,
-    n_workers = 1L,              # 1 = sequential
-    overwrite = FALSE
+    n_workers    = 1L,             # 1 = sequential
+    overwrite    = FALSE
   )
 
   i <- 1L
@@ -81,6 +82,7 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
       "--B"             = { defaults$B         <- as.integer(val); i <- i + 2L },
       "--base-seed"     = { defaults$base_seed <- as.integer(val); i <- i + 2L },
       "--N"             = { defaults$N         <- as.integer(val); i <- i + 2L },
+      "--rescale-time"  = { defaults$rescale_time <- as.numeric(val); i <- i + 2L },
       "--dgm"           = { defaults$dgm       <- strsplit(val, ",")[[1]];     i <- i + 2L },
       "--misspec"       = { defaults$misspec   <- strsplit(val, ",")[[1]];     i <- i + 2L },
       "--rho"           = { defaults$rho       <- as.numeric(strsplit(val, ",")[[1]]); i <- i + 2L },
@@ -246,15 +248,17 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
 
     est <- aiptw_estimate(
       surv.df, scenario_row$ps_spec, scenario_row$out_spec,
-      t_eval     = opts$t_eval,
-      admin.cens = dgm_params$admin.cens
+      t_eval       = opts$t_eval,
+      admin.cens   = dgm_params$admin.cens,
+      rescale_time = opts$rescale_time
     )
 
     boot <- aiptw_bootstrap(
       surv.df, scenario_row$ps_spec, scenario_row$out_spec,
-      t_eval     = opts$t_eval,
-      admin.cens = dgm_params$admin.cens,
-      B          = opts$B
+      t_eval       = opts$t_eval,
+      admin.cens   = dgm_params$admin.cens,
+      rescale_time = opts$rescale_time,
+      B            = opts$B
     )
 
     # Long-format with status carried through.
