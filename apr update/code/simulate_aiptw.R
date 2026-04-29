@@ -125,6 +125,18 @@ run_replications <- function(R, f, n_workers = 1L, base_seed = 0L) {
 
 
 ## ---- Single-scenario runner ------------------------------------------------
+##
+## Crash-safe checkpoint protocol:
+##   - Each replicate writes its result to results/raw/<scenario_id>/rep_NNNNN.csv
+##     immediately on completion. If any rep file already exists when the
+##     scenario starts, it is loaded as-is and the rep is not re-run; this
+##     enables resume-after-interrupt without --overwrite.
+##   - When all R replicates have files on disk, the rep files are
+##     consolidated into a single results/raw/<scenario_id>.csv and the
+##     per-rep directory is removed. The summariser reads only the
+##     consolidated CSVs, so an interrupted scenario (per-rep dir present,
+##     consolidated CSV absent) is correctly skipped by the aggregator until
+##     the run completes.
 
 run_one_scenario <- function(scenario_row, dgm_params, opts) {
 
@@ -133,6 +145,10 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
                            n_L = dgm_params$N.Lcovs.linear +
                                   dgm_params$N.Lcovs.sq)
   dgm_params$sigma <- sigma_use
+
+  # Per-scenario rep-checkpoint directory
+  rep_dir <- file.path(RAW_DIR, scenario_row$scenario_id)
+  dir.create(rep_dir, recursive = TRUE, showWarnings = FALSE)
 
   # Truth (does not depend on rep seed)
   truth <- compute_truth(
@@ -153,6 +169,12 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
 
   # Per-replication function (closure over opts and scenario)
   rep_fn <- function(r) {
+    rep_path <- file.path(rep_dir, sprintf("rep_%05d.csv", r))
+    if (file.exists(rep_path)) {
+      # Resume: rep already completed in a previous invocation.
+      return(utils::read.csv(rep_path, stringsAsFactors = FALSE))
+    }
+
     sim <- sim_surv_data(
       seed         = opts$base_seed + r,
       N            = opts$N,
@@ -188,15 +210,30 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
       B          = opts$B
     )
 
+    # Long-format with status carried through.
     est_long <- dplyr::bind_rows(
-      data.frame(t = est$t, target = "S0", est = est$S0),
-      data.frame(t = est$t, target = "S1", est = est$S1),
-      data.frame(t = est$t, target = "RD", est = est$RD)
+      data.frame(t = est$t, target = "S0", est = est$S0,
+                 status = est$status, error_msg = est$error_msg,
+                 stringsAsFactors = FALSE),
+      data.frame(t = est$t, target = "S1", est = est$S1,
+                 status = est$status, error_msg = est$error_msg,
+                 stringsAsFactors = FALSE),
+      data.frame(t = est$t, target = "RD", est = est$RD,
+                 status = est$status, error_msg = est$error_msg,
+                 stringsAsFactors = FALSE)
     )
 
     rep_df <- dplyr::left_join(est_long, boot, by = c("t", "target"))
     rep_df$rep         <- r
     rep_df$scenario_id <- scenario_row$scenario_id
+    rep_df$dgm         <- scenario_row$dgm
+    rep_df$misspec     <- scenario_row$misspec
+    rep_df$rho_L       <- scenario_row$rho_L
+
+    # Atomic checkpoint: write to a tmp file, then rename.
+    tmp_path <- paste0(rep_path, ".tmp")
+    utils::write.csv(rep_df, tmp_path, row.names = FALSE)
+    file.rename(tmp_path, rep_path)
     rep_df
   }
 
@@ -204,10 +241,16 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
                                 base_seed = opts$base_seed)
 
   rep_df <- do.call(rbind, rep_list)
-  rep_df$dgm     <- scenario_row$dgm
-  rep_df$misspec <- scenario_row$misspec
-  rep_df$rho_L   <- scenario_row$rho_L
-  list(reps = rep_df, truth = truth)
+
+  # Report failure rate up front so the user notices early.
+  n_fail <- sum(rep_df$status == "error" & rep_df$target == "S0")
+  if (n_fail > 0) {
+    warning(sprintf("[%s] %d / %d replicates failed; see error_msg column",
+                    scenario_row$scenario_id, n_fail, opts$R),
+            call. = FALSE)
+  }
+
+  list(reps = rep_df, truth = truth, rep_dir = rep_dir)
 }
 
 
@@ -251,8 +294,16 @@ main <- function() {
 
     res <- run_one_scenario(sc, dgm_params, opts)
 
-    utils::write.csv(res$reps,  raw_path,   row.names = FALSE)
+    # Atomic consolidate: write tmp -> rename, then drop the rep_dir so
+    # the summariser sees only completed scenarios.
+    tmp_raw <- paste0(raw_path, ".tmp")
+    utils::write.csv(res$reps,  tmp_raw,    row.names = FALSE)
+    file.rename(tmp_raw, raw_path)
+
     utils::write.csv(res$truth, truth_path, row.names = FALSE)
+    if (dir.exists(res$rep_dir)) {
+      unlink(res$rep_dir, recursive = TRUE)
+    }
     message(sprintf("[wrote] %s  (%d rows)", raw_path, nrow(res$reps)))
   }
 

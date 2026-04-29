@@ -79,6 +79,9 @@ Rscript summarise_aiptw.R
 | t | evaluation time (1, 5, or 10) |
 | target | `S0`, `S1`, or `RD` |
 | est | point estimate (raw, unclipped) |
+| status | `"ok"` or `"error"` |
+| error_msg | error message when `status == "error"`, NA otherwise |
+| n_boot_ok | number of successful bootstrap resamples (out of B) |
 | se | bootstrap SE |
 | ci_lo, ci_hi | 95% percentile bootstrap CI |
 
@@ -86,4 +89,19 @@ Rscript summarise_aiptw.R
 analytic Weibull truth.
 
 `results/summary.csv` — one row per (scenario, t, target) holding the
-protocol Section 6.5 metrics.
+protocol Section 6.5 metrics: `n_reps_total`, `n_reps_ok`, `n_reps_failed`,
+`mean_n_boot_ok`, `truth`, `mean_est`, `bias`, `rel_bias_pct`,
+`empirical_sd`, `mean_model_se`, `rel_se_err`, `coverage`, `power`,
+`mean_ci_width`. Power is reported only for the RD target.
+
+## Checkpointing and resume
+
+Each replicate writes its row to `results/raw/<scenario_id>/rep_NNNNN.csv`
+as soon as it completes. When all R replicates exist, the rep files are
+consolidated into `results/raw/<scenario_id>.csv` (atomic via tmp+rename)
+and the per-rep directory is removed.
+
+If `simulate_aiptw.R` is interrupted partway through a scenario, restarting
+it (without `--overwrite`) skips already-completed scenarios and resumes
+the in-progress one from the last checkpointed replicate. Failed replicate
+fits are recorded with `status = "error"` rather than dropped silently.
