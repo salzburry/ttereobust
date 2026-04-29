@@ -140,6 +140,10 @@ set_parallel_plan <- function(n_workers) {
 ## survSplit, ...) that are pulled in via source() in the parent session
 ## but not automatically reproduced on the worker, which would error or
 ## silently fall back to the wrong namespace.
+##
+## Sequential mode prints periodic progress messages so a long run on a
+## 1-CPU pod does not appear frozen between scenario start and scenario
+## complete.
 run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
                               packages = c("survival", "dplyr", "MASS")) {
   if (n_workers > 1L && requireNamespace("furrr", quietly = TRUE)) {
@@ -149,7 +153,20 @@ run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
                         packages = packages
                       ))
   } else {
-    lapply(seq_len(R), f)
+    t0       <- Sys.time()
+    interval <- max(1L, R %/% 20L)         # ~20 progress messages per scenario
+    out      <- vector("list", R)
+    for (r in seq_len(R)) {
+      out[[r]] <- f(r)
+      if (r == 1L || r %% interval == 0L || r == R) {
+        elapsed <- as.numeric(Sys.time() - t0, units = "secs")
+        eta     <- elapsed * (R - r) / r
+        message(sprintf(
+          "    [rep %d/%d]  elapsed=%.1fs  eta=%.1fs", r, R, elapsed, eta
+        ))
+      }
+    }
+    out
   }
 }
 
