@@ -9,8 +9,15 @@
 
 compute_truth <- function(t_eval = c(1, 5, 10),
                            dgm,
-                           N_truth     = 500000,
+                           N_truth     = NULL,
                            truth_seed  = 1234567L) {
+
+  # Honour dgm$N_truth if the caller passed it inside the DGM list (e.g.
+  # from a YAML config). Explicit N_truth argument wins; otherwise fall
+  # back to a 500000-row default.
+  if (is.null(N_truth)) {
+    N_truth <- if (!is.null(dgm$N_truth)) as.integer(dgm$N_truth) else 500000L
+  }
 
   ## dgm must contain at least: N.Lcovs.linear, N.Lcovs.sq, mu, sigma,
   ##   alpha.L, alpha.W, coeff.A, coeff.L, coeff.Lsq, coeff.O, coeff.W,

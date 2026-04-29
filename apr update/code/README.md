@@ -47,6 +47,32 @@ apr update/code/
     └── summary.csv
 ```
 
+## Dependencies
+
+Install once on the pod:
+
+```r
+install.packages(c(
+  # Core simulation + estimator
+  "survival", "dplyr", "tidyr", "ggplot2", "MASS", "purrr",
+  # YAML config support (--config flag)
+  "yaml",
+  # Cox AIPTW arm (riskRegression::ate())
+  "riskRegression",
+  # Optional: faster digest of DGM params for the cfg sidecar
+  "digest",
+  # Quarto report rendering
+  "knitr", "rmarkdown"
+))
+```
+
+Plus the `quarto` system binary (already present in most Domino R
+images; otherwise install from <https://quarto.org/docs/get-started/>).
+
+`yaml` and `riskRegression` are loaded only when the corresponding
+features are exercised: a PLR-only run with no `--config` flag does
+not require them.
+
 ## Run order
 
 From `apr update/code/`:
@@ -137,6 +163,7 @@ quarto render reports/AIPTW_report.qmd
 |---|---|
 | scenario_id | `<dgm>__<misspec>__rho<rho_L>` |
 | dgm, misspec, rho_L | scenario keys |
+| method | `"aiptw_plr"` or `"aiptw_cox"` (which AIPTW variant produced this row) |
 | rep | replicate index |
 | t | evaluation time (1, 5, or 10) |
 | target | `S0`, `S1`, or `RD` |
@@ -149,6 +176,8 @@ quarto render reports/AIPTW_report.qmd
 | boot_errors | distinct error messages from any failed bootstrap fits, joined with ` | ` (NA when none) |
 | se | bootstrap SE |
 | ci_lo, ci_hi | 95% percentile bootstrap CI |
+| if_se | influence-function SE (Cox arm only; NA on PLR rows) |
+| if_ci_lo, if_ci_hi | 95% IF-based CI (Cox arm only; NA on PLR rows) |
 
 `results/truth/<scenario_id>.csv` — one row per `t`, with `S0`, `S1`, and
 `RD` as separate columns plus the scenario keys (`scenario_id`, `dgm`,
@@ -160,20 +189,25 @@ protocol Section 6.5 metrics plus audit columns:
 
 | column | description |
 |---|---|
+| method | `"aiptw_plr"` or `"aiptw_cox"` (groups one row per variant) |
 | n_reps_total | rows in the raw CSV for this group |
 | n_reps_ok | replicates whose AIPTW estimator returned status = "ok" |
 | n_reps_failed | `n_reps_total − n_reps_ok` |
 | mean_n_boot_total | average planned bootstrap reps (= `B`) |
 | mean_n_boot_ok | average successful bootstrap reps |
 | mean_n_boot_failed | average failed bootstrap reps |
-| n_ci_ok | replicates with finite CI bounds (denominator for `coverage` and `power`) |
+| n_ci_ok | replicates with finite bootstrap CI bounds (denominator for `coverage` and `power`) |
+| n_if_ok | replicates with finite IF-based CI bounds (Cox arm only; denominator for `if_coverage`) |
 | truth | analytic Weibull truth |
 | mean_est | mean of `est` across replicates |
 | bias, rel_bias_pct | absolute and relative bias |
 | empirical_sd | sd of `est` across replicates |
 | mean_model_se | mean of bootstrap SE |
 | rel_se_err | `mean_model_se / empirical_sd − 1` |
-| coverage | proportion of `n_ci_ok` CIs containing the truth |
+| mean_if_se | mean of IF-based SE (Cox arm only; NA otherwise) |
+| rel_if_se_err | `mean_if_se / empirical_sd − 1` (Cox arm only) |
+| coverage | proportion of `n_ci_ok` bootstrap CIs containing the truth |
+| if_coverage | proportion of `n_if_ok` IF-based CIs containing the truth (Cox arm only) |
 | power | for `RD` rows only: proportion of CIs excluding 0; NA for `S0`, `S1` |
 | mean_ci_width | average bootstrap CI width |
 | boot_errors_seen | distinct bootstrap error messages observed across replicates, joined with ` || ` (NA when none) |

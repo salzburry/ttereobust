@@ -1,27 +1,13 @@
 ## aiptw.R
 ##
-## AIPTW-Cox: continuous-time variant of the AIPTW estimator that uses an
-## unweighted Cox PH outcome model combined with the explicit AIPTW
-## augmentation term and IPCW correction (marginal KM under independent
-## censoring).
+## Interactive single-dataset demo of the AIPTW-Cox arm. This script
+## now uses utils/aiptw_cox_estimator.R (the same estimator the
+## protocol harness runs when --method aiptw_cox or --method both is
+## passed to simulate_aiptw.R), so the demo and the production harness
+## are guaranteed to compute identical numbers on the same dataset.
 ##
-## Adds value over aiptw_discrete.R / utils/aiptw_estimator.R, which use
-## a discrete-time logit-PLR outcome model (the canonical link for the
-## AIPTW algebraic-equivalence result, Gabriel et al. 2024). This script
-## is the "Cox outcome" comparison arm.
-##
-## Formula:
-##   S^a_AIPTW(t) = (1/n) sum_i {
-##       Q_i(a, t)  +  [I(A_i = a) / pi_i(a)]  *  [Y~_i(t) - Q_i(a, t)]
-##   }
-## with
-##   Q_i(a, t) = exp(-H0(t) * exp(LP_i(a)))
-##   pi_i(a)   = P(A_i = a | L_i)                trimmed propensity
-##   Y~_i(t)   = I(T~_i >= t) / G(t-)            IPCW-corrected outcome
-##
-## For protocol-grade replicated runs use simulate_aiptw.R (logit-PLR
-## variant). The Cox variant has not been wired into the harness; this
-## script is a single-dataset interactive demo.
+## For protocol-grade replicated runs (R x scenario grid x bootstrap
+## CIs) use simulate_aiptw.R --method aiptw_cox or run_aiptw_cox_analysis.R.
 
 suppressPackageStartupMessages({
   library(survival); library(dplyr); library(ggplot2); library(MASS)
@@ -33,51 +19,22 @@ source("utils/scenarios.R")
 
 
 ## ---- AIPTW-Cox estimator --------------------------------------------------
-##
-## Pure function: takes one dataset and the spec strings, returns a data
-## frame with t / S0 / S1 / RD on the requested grid.
+## Sourced from utils/ so this demo and the production harness use the
+## SAME estimator (riskRegression::ate-based AIPTW with Cox outcome and
+## a marginal censoring model). The local wrapper below adapts the
+## utility's wide-format return to a slim (t, S0, S1, RD) data frame for
+## plotting.
+
+source("utils/aiptw_cox_estimator.R")
 
 run_aiptw_cox <- function(surv.df, ps_spec, out_spec,
                            t_eval, admin.cens,
                            ps_trim = c(0.01, 0.99)) {
-
-  # Propensity score (trimmed)
-  ps.mod <- glm(as.formula(paste("A ~", ps_spec)),
-                family = "binomial", data = surv.df)
-  pi_1 <- pmin(pmax(predict(ps.mod, type = "response"),
-                    ps_trim[1]), ps_trim[2])
-  ipw_ind1 <- ifelse(surv.df$A == 1L, 1 / pi_1,       0)
-  ipw_ind0 <- ifelse(surv.df$A == 0L, 1 / (1 - pi_1), 0)
-
-  # Cox outcome model + baseline cumulative hazard (with H0(0) = 0
-  # prepended so survival starts at 1 exactly).
-  cox.mod <- coxph(as.formula(paste("Surv(eventtime, event) ~", out_spec)),
-                   data = surv.df, ties = "breslow", x = TRUE)
-  H0 <- rbind(data.frame(time = 0, hazard = 0),
-              basehaz(cox.mod, centered = FALSE))
-  lp0 <- predict(cox.mod, newdata = mutate(surv.df, A = 0), type = "lp")
-  lp1 <- predict(cox.mod, newdata = mutate(surv.df, A = 1), type = "lp")
-  h0_all <- approx(H0$time, H0$hazard, xout = t_eval,
-                   method = "constant", f = 0, rule = 2)$y
-
-  # IPCW G(t-) (left limit; avoids divide-by-zero at admin.cens)
-  cens.km <- survfit(Surv(eventtime, 1L - event) ~ 1, data = surv.df)
-  G_tminus <- pmax(
-    summary(cens.km, times = pmax(t_eval - 1e-8, 0), extend = TRUE)$surv,
-    1e-6
-  )
-
-  obs_time <- surv.df$eventtime
-  do.call(rbind, lapply(seq_along(t_eval), function(k) {
-    t_k <- t_eval[k]
-    if (t_k == 0) return(data.frame(t = 0, S0 = 1, S1 = 1, RD = 0))
-    Q0 <- exp(-h0_all[k] * exp(lp0))
-    Q1 <- exp(-h0_all[k] * exp(lp1))
-    Y_ipcw <- as.numeric(obs_time >= t_k) / G_tminus[k]
-    S0 <- mean(Q0 + ipw_ind0 * (Y_ipcw - Q0))
-    S1 <- mean(Q1 + ipw_ind1 * (Y_ipcw - Q1))
-    data.frame(t = t_k, S0 = S0, S1 = S1, RD = S1 - S0)
-  }))
+  est <- aiptw_cox_estimate(surv.df, ps_spec, out_spec,
+                             t_eval = t_eval,
+                             admin.cens = admin.cens,
+                             ps_trim = ps_trim)
+  est[, c("t", "S0", "S1", "RD")]
 }
 
 

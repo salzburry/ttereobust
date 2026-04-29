@@ -1,38 +1,36 @@
 ## run_aiptw_plr_analysis.R
 ##
 ## Thin wrapper that runs simulate_aiptw.R with --method aiptw_plr over
-## the full protocol grid using the YAML configs in config/. Written to
-## match the working group's run_<method>_analysis.R naming convention so
-## the cross-method Comparison.qmd can pick up these outputs the same
-## way it does for IPTW / G-comp / TMLE.
+## the full protocol grid. Defaults to protocol-grade settings; pass any
+## simulate_aiptw.R flag through and it overrides the default.
 ##
-## Defaults are the protocol-grade settings (R = 1900, B = 200,
-## --rescale-time 0.25). Override with --R, --B, etc. as needed.
+## Outputs land under results/raw/aiptw_plr/<scenario>.csv so this
+## wrapper can coexist with run_aiptw_cox_analysis.R in the same
+## results directory.
 ##
 ## Usage:
 ##   Rscript run_aiptw_plr_analysis.R                 # full grid, defaults
 ##   Rscript run_aiptw_plr_analysis.R --R 50 --B 50   # smoke test
 ##   Rscript run_aiptw_plr_analysis.R --workers 16    # parallel
 
-argv <- commandArgs(trailingOnly = TRUE)
-default_args <- c("--method", "aiptw_plr",
-                  "--R", "1900",
-                  "--B", "200",
-                  "--rescale-time", "0.25")
+local({
+  argv <- commandArgs(trailingOnly = TRUE)
+  fill_arg <- function(av, flag, val) {
+    if (any(av == flag)) av else c(av, flag, val)
+  }
+  argv <- fill_arg(argv, "--method",       "aiptw_plr")
+  argv <- fill_arg(argv, "--R",            "1900")
+  argv <- fill_arg(argv, "--B",            "200")
+  argv <- fill_arg(argv, "--rescale-time", "0.25")
 
-# Forward the user's args; default_args fills in anything they didn't set.
-fill_arg <- function(flag, val) {
-  if (any(argv == flag)) argv else c(argv, flag, val)
-}
-argv <- fill_arg("--method",       "aiptw_plr")
-argv <- fill_arg("--R",            "1900")
-argv <- fill_arg("--B",            "200")
-argv <- fill_arg("--rescale-time", "0.25")
+  # Override commandArgs so that simulate_aiptw.R picks up our prefilled
+  # flags. on.exit() inside this local() block restores the original.
+  old <- commandArgs
+  commandArgs <<- function(trailingOnly = FALSE) {
+    if (trailingOnly) argv else c("RScript", "--", argv)
+  }
+  on.exit(commandArgs <<- old, add = TRUE)
 
-# Stash and re-pass so simulate_aiptw.R's parse_cli_args() picks them up.
-old <- commandArgs
-commandArgs <- function(trailingOnly = FALSE) argv
-on.exit(commandArgs <- old, add = TRUE)
-
-source("simulate_aiptw.R")
-main()
+  source("simulate_aiptw.R")
+  main()
+})

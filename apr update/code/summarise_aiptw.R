@@ -41,12 +41,28 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
 }
 
 
-load_csv_dir <- function(dir) {
-  # Read only the consolidated scenario files at the top of `dir`. Sub-
-  # directories are per-rep checkpoints from in-progress simulate_aiptw.R
-  # runs and should not be included in the aggregate.
-  files <- list.files(dir, pattern = "\\.csv$", full.names = TRUE,
-                       recursive = FALSE)
+## Read consolidated scenario CSVs. Top-level CSVs (legacy layout) AND
+## one level of subdirectories (new method-specific layout
+## results/raw/<method>/<scenario>.csv) are both included, but per-rep
+## checkpoint directories (results/raw/<method>/<scenario>/rep_*.csv)
+## are skipped: those exist only while a scenario is mid-flight and
+## have a different schema (no aggregation key).
+load_csv_dir <- function(dir, method_layout = TRUE) {
+  files <- character(0)
+  if (method_layout) {
+    # Method subdirs (results/raw/<method>/<scenario>.csv); rep_*.csv
+    # files live one level deeper and are filtered out.
+    method_dirs <- list.dirs(dir, recursive = FALSE)
+    for (md in method_dirs) {
+      files <- c(files, list.files(md, pattern = "\\.csv$",
+                                    full.names = TRUE,
+                                    recursive = FALSE))
+    }
+  }
+  files <- c(files,
+             list.files(dir, pattern = "\\.csv$", full.names = TRUE,
+                         recursive = FALSE))
+  files <- unique(files[!grepl("/rep_\\d+\\.csv$", files)])
   if (length(files) == 0L) stop("No CSVs found in ", dir)
   do.call(rbind, lapply(files, utils::read.csv, stringsAsFactors = FALSE))
 }
@@ -55,8 +71,8 @@ load_csv_dir <- function(dir) {
 main <- function() {
   opts <- parse_cli_args()
 
-  reps  <- load_csv_dir(RAW_DIR)
-  truth <- load_csv_dir(TRUTH_DIR)
+  reps  <- load_csv_dir(RAW_DIR,   method_layout = TRUE)
+  truth <- load_csv_dir(TRUTH_DIR, method_layout = FALSE)
 
   # Some older outputs may not have the audit columns; default them so
   # the aggregator still produces a usable summary.
@@ -154,15 +170,24 @@ main <- function() {
       bias              = mean_est - truth,
       rel_bias_pct      = 100 * bias / abs(truth),
       empirical_sd      = stats::sd(est, na.rm = TRUE),
-      mean_model_se     = mean(se, na.rm = TRUE),
-      rel_se_err        = mean_model_se / empirical_sd - 1,
-      # IF-based SE summary (Cox arm only; NA for PLR).
-      mean_if_se        = mean(if_se, na.rm = TRUE),
-      rel_if_se_err     = mean_if_se / empirical_sd - 1,
-      coverage          = mean(ci_lo <= truth & truth <= ci_hi,
-                                na.rm = TRUE),
-      if_coverage       = mean(if_ci_lo <= truth & truth <= if_ci_hi,
-                                na.rm = TRUE),
+      # Bootstrap SE / coverage. Gate on n_ci_ok so an all-NA column
+      # (e.g. B = 0 smoke run) yields NA rather than NaN.
+      mean_model_se     = if (n_ci_ok > 0L) mean(se, na.rm = TRUE) else NA_real_,
+      rel_se_err        = if (n_ci_ok > 0L && !is.na(empirical_sd) &&
+                              empirical_sd > 0)
+                            mean_model_se / empirical_sd - 1 else NA_real_,
+      # IF-based SE summary (Cox arm only). Gate on n_if_ok so PLR rows
+      # (no IF column populated) yield NA cleanly.
+      mean_if_se        = if (n_if_ok > 0L) mean(if_se, na.rm = TRUE) else NA_real_,
+      rel_if_se_err     = if (n_if_ok > 0L && !is.na(empirical_sd) &&
+                              empirical_sd > 0)
+                            mean_if_se / empirical_sd - 1 else NA_real_,
+      coverage          = if (n_ci_ok > 0L)
+                            mean(ci_lo <= truth & truth <= ci_hi,
+                                  na.rm = TRUE) else NA_real_,
+      if_coverage       = if (n_if_ok > 0L)
+                            mean(if_ci_lo <= truth & truth <= if_ci_hi,
+                                  na.rm = TRUE) else NA_real_,
       # Power: P(CI excludes 0). Meaningful only for the RD target where
       # H0: RD = 0 makes sense. S0 and S1 are survival probabilities far
       # from 0 by construction, so 'power' for those targets is NA.

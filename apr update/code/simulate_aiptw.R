@@ -53,6 +53,8 @@ source(file.path(CODE_DIR, "utils", "cor_matrix.R"))
 source(file.path(CODE_DIR, "utils", "aiptw_estimator.R"))
 source(file.path(CODE_DIR, "utils", "compute_truth.R"))
 source(file.path(CODE_DIR, "utils", "scenarios.R"))
+# load_config.R checks for `yaml` only when read_dgm_yaml() is called,
+# so sourcing it is harmless for PLR-only runs that never use --config.
 source(file.path(CODE_DIR, "utils", "load_config.R"))
 # AIPTW-Cox arm sourced lazily inside main() so a PLR-only run does
 # not require riskRegression to be installed.
@@ -114,7 +116,47 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
          defaults$method)
   }
 
+  # --config can come in two flavours:
+  #   (a) a SINGLE-DGM YAML (e.g. config/ph.yml). Then --dgm must be
+  #       passed and must select exactly one DGM, otherwise the same
+  #       PH parameter set would be applied to delayed/waning rows
+  #       and produce mislabelled output.
+  #   (b) per-DGM defaults at config/<dgm>.yml: not passed via
+  #       --config; the loop picks them up automatically based on
+  #       sc$dgm, so they apply correctly to a multi-DGM grid.
+  if (!is.null(defaults$config)) {
+    if (!file.exists(defaults$config)) {
+      stop("--config file not found: ", defaults$config)
+    }
+    if (is.null(defaults$dgm) || length(defaults$dgm) != 1L) {
+      stop("--config <yml> requires --dgm to be passed with exactly one ",
+           "DGM (otherwise the YAML would be applied across mismatched ",
+           "DGM labels). Pass --dgm ph (or delayed/waning), or omit ",
+           "--config and let the per-DGM defaults at config/<dgm>.yml ",
+           "apply automatically.")
+    }
+  }
+
   defaults
+}
+
+
+## Apply YAML-supplied DGM-level options on top of CLI args. Per-CLI
+## overrides win: if the user passed --N or --t-eval explicitly we keep
+## those, otherwise the YAML's values become the active values.
+apply_yaml_to_opts <- function(opts, dgm_params, raw_argv) {
+  cli_set <- function(flag) any(flag == raw_argv)
+  if (!is.null(dgm_params$N) && !cli_set("--N")) {
+    opts$N <- as.integer(dgm_params$N)
+  }
+  if (!is.null(dgm_params$t_eval) && !cli_set("--t-eval")) {
+    opts$t_eval <- as.numeric(dgm_params$t_eval)
+  }
+  # N_truth has no CLI flag; YAML value wins if present.
+  if (!is.null(dgm_params$N_truth)) {
+    opts$N_truth <- as.integer(dgm_params$N_truth)
+  }
+  opts
 }
 
 
@@ -225,7 +267,8 @@ run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
 ##     the run completes.
 
 run_one_scenario <- function(scenario_row, dgm_params, opts,
-                              truth_cache = new.env(parent = emptyenv())) {
+                              truth_cache = new.env(parent = emptyenv()),
+                              rep_dir = NULL) {
 
   # Validate that admin.cens is an integer multiple of rescale_time. If
   # not, the discrete-time grid does not land on admin.cens and the
@@ -245,8 +288,12 @@ run_one_scenario <- function(scenario_row, dgm_params, opts,
                                   dgm_params$N.Lcovs.sq)
   dgm_params$sigma <- sigma_use
 
-  # Per-scenario rep-checkpoint directory
-  rep_dir <- file.path(RAW_DIR, scenario_row$scenario_id)
+  # Per-scenario rep-checkpoint directory. Caller supplies the full path
+  # (which is method-subdir-aware); fall back to the legacy location for
+  # in-process callers.
+  if (is.null(rep_dir)) {
+    rep_dir <- file.path(RAW_DIR, scenario_row$scenario_id)
+  }
   dir.create(rep_dir, recursive = TRUE, showWarnings = FALSE)
 
   # Truth depends on (dgm, rho_L) but NOT on the misspecification
@@ -470,34 +517,70 @@ main <- function() {
                      normalizePath(opts$config, mustWork = FALSE)
   )
 
+  # Method-specific subdirectory under results/raw/ so the PLR and Cox
+  # arms can coexist without colliding on scenario_id. (Truth is method-
+  # independent and stays under results/truth/.)
+  method_subdir <- file.path(RAW_DIR, opts$method)
+  dir.create(method_subdir, recursive = TRUE, showWarnings = FALSE)
+
   for (i in seq_len(nrow(grid))) {
     sc <- as.list(grid[i, ])
 
-    raw_path   <- file.path(RAW_DIR,   paste0(sc$scenario_id, ".csv"))
-    truth_path <- file.path(TRUTH_DIR, paste0(sc$scenario_id, ".csv"))
-    rep_dir    <- file.path(RAW_DIR,   sc$scenario_id)
-    cfg_path   <- file.path(RAW_DIR,   paste0(sc$scenario_id, ".cfg"))
+    raw_path   <- file.path(method_subdir, paste0(sc$scenario_id, ".csv"))
+    truth_path <- file.path(TRUTH_DIR,     paste0(sc$scenario_id, ".csv"))
+    rep_dir    <- file.path(method_subdir, sc$scenario_id)
+    cfg_path   <- file.path(method_subdir, paste0(sc$scenario_id, ".cfg"))
 
-    # If a completed scenario or partial checkpoint exists, refuse to
-    # touch it unless the previously-stored config matches the current
-    # one (or --overwrite is set). Without this check, running the
-    # README smoke test (R=50/B=50) and then the protocol grid
-    # (R=1900/B=200) silently reuses smoke rows as protocol rows.
+    # Resolve DGM params FIRST (before the cfg check) so we can hash
+    # their contents into the cfg. This catches YAML edits at the same
+    # path -- previously the cfg only stored the path string, so an
+    # in-place edit of config/ph.yml could be silently reused as if
+    # compatible.
+    if (!exists(sc$dgm, envir = dgm_cache, inherits = FALSE)) {
+      # Three sources for the DGM parameter list, in priority:
+      #   (1) --config <yml>: explicit path passed on the CLI
+      #   (2) config/<dgm>.yml: per-DGM YAML in the config directory
+      #   (3) get_params_<dgm>.R: legacy R parameter file (back-compat)
+      yaml_default <- file.path(CODE_DIR, "config",
+                                 paste0(sc$dgm, ".yml"))
+      yaml_path <- if (!is.null(opts$config)) opts$config else
+                    if (file.exists(yaml_default)) yaml_default else NULL
+
+      if (!is.null(yaml_path)) {
+        dp <- read_dgm_yaml(yaml_path)
+        # YAML overrides for DGM-level options the CLI did not set
+        # explicitly (--N, --t-eval, N_truth).
+        opts <<- apply_yaml_to_opts(opts, dp,
+                                     commandArgs(trailingOnly = TRUE))
+        assign(sc$dgm, dp, envir = dgm_cache)
+      } else {
+        assign(sc$dgm, load_dgm_params(sc$dgm, code_dir = CODE_DIR),
+               envir = dgm_cache)
+      }
+    }
+    dgm_params <- get(sc$dgm, envir = dgm_cache)
+
+    # Build the per-scenario config: run-level keys + a content-hash of
+    # the DGM parameters so YAML edits are detected.
+    scenario_cfg <- c(current_cfg,
+                      list(dgm_hash = hash_dgm_params(dgm_params)))
+
     # Legacy checkpoint detection: outputs from a pre-.cfg run cannot
     # have their config validated. Refuse to resume without --overwrite.
     legacy_present <- (file.exists(raw_path) || dir.exists(rep_dir)) &&
                       !file.exists(cfg_path)
     if (legacy_present && !opts$overwrite) {
       stop(sprintf(
-        "[%s] outputs exist from an older run with no .cfg sidecar; cannot validate config compatibility. Re-run with --overwrite or remove results/raw/%s* first.",
-        sc$scenario_id, sc$scenario_id
+        "[%s] outputs exist from an older run with no .cfg sidecar; cannot validate config compatibility. Re-run with --overwrite or remove %s* first.",
+        sc$scenario_id, raw_path
       ))
     }
 
     if (file.exists(cfg_path) && !opts$overwrite) {
       prev_cfg  <- dget(cfg_path)
-      diff_keys <- names(current_cfg)[
-        !mapply(identical, current_cfg, prev_cfg[names(current_cfg)])
+      diff_keys <- names(scenario_cfg)[
+        !mapply(identical, scenario_cfg,
+                prev_cfg[names(scenario_cfg)])
       ]
       if (length(diff_keys) > 0L) {
         stop(sprintf(
@@ -512,9 +595,7 @@ main <- function() {
       next
     }
 
-    # On --overwrite, also clear any per-replicate checkpoint files from
-    # an earlier interrupted run; otherwise the rep_fn would resume from
-    # stale checkpoints and silently mix old rows with new ones.
+    # On --overwrite, clear any per-replicate checkpoint files too.
     if (opts$overwrite) {
       if (file.exists(raw_path))   unlink(raw_path)
       if (file.exists(truth_path)) unlink(truth_path)
@@ -522,43 +603,18 @@ main <- function() {
       if (dir.exists(rep_dir))     unlink(rep_dir, recursive = TRUE)
     }
 
-    # Write the config sidecar BEFORE running so that an interrupted run
-    # leaves both the partial rep_dir and the canonical cfg behind, and a
-    # subsequent invocation can validate them against each other before
-    # resuming.
-    dput(current_cfg, file = cfg_path)
-
-    if (!exists(sc$dgm, envir = dgm_cache, inherits = FALSE)) {
-      # Three sources for the DGM parameter list, in priority:
-      #   (1) --config <yml>: explicit path passed on the CLI
-      #   (2) config/<dgm>.yml: per-DGM YAML in the config directory
-      #   (3) get_params_<dgm>.R: legacy R parameter file (back-compat)
-      yaml_default <- file.path(CODE_DIR, "config",
-                                 paste0(sc$dgm, ".yml"))
-      yaml_path <- if (!is.null(opts$config)) opts$config else
-                    if (file.exists(yaml_default)) yaml_default else NULL
-
-      if (!is.null(yaml_path)) {
-        assign(sc$dgm, read_dgm_yaml(yaml_path), envir = dgm_cache)
-      } else {
-        assign(sc$dgm, load_dgm_params(sc$dgm, code_dir = CODE_DIR),
-               envir = dgm_cache)
-      }
-    }
-    dgm_params <- get(sc$dgm, envir = dgm_cache)
+    # Write cfg before running so resume can validate.
+    dput(scenario_cfg, file = cfg_path)
 
     message(sprintf("\n========== [%d/%d] %s ==========",
                     i, nrow(grid), sc$scenario_id))
 
-    res <- run_one_scenario(sc, dgm_params, opts, truth_cache)
+    res <- run_one_scenario(sc, dgm_params, opts, truth_cache,
+                             rep_dir = rep_dir)
 
-    # Atomic consolidate. Order matters: the summariser uses the
-    # presence of raw_path as the signal that a scenario is complete and
-    # joins it to the truth CSV. Therefore truth must be written BEFORE
-    # raw. Without this ordering an interruption between the raw rename
-    # and the truth write would leave the summariser seeing the scenario
-    # as "done" while the matching truth was missing or stale, producing
-    # NA truth values and NaN performance metrics.
+    # Atomic consolidate. Order: truth first, then raw, because the
+    # summariser uses raw existence as the "complete" signal and joins
+    # to the truth file.
     tmp_truth <- paste0(truth_path, ".tmp")
     utils::write.csv(res$truth, tmp_truth, row.names = FALSE)
     ok_t <- file.rename(tmp_truth, truth_path)

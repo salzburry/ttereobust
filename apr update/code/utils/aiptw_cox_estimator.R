@@ -59,6 +59,16 @@ aiptw_cox_estimate_inner <- function(surv.df, ps_spec, out_spec,
   cox_fit <- survival::coxph(cox_formula, data = df,
                               x = TRUE, y = TRUE, ties = "breslow")
 
+  # Censoring model. The DGM has independent (admin + Exp(lambda_cens))
+  # censoring; ate(estimator = "AIPTW") in the presence of censoring
+  # needs a nuisance model for the censoring distribution. A marginal
+  # KM-equivalent (Cox on intercept) matches the PLR arm's IPCW, which
+  # also uses a marginal Kaplan-Meier of the censoring distribution.
+  cens_fit <- survival::coxph(
+    survival::Surv(eventtime, event == 0L) ~ 1,
+    data = df, x = TRUE, y = TRUE, ties = "breslow"
+  )
+
   # ate() requires strictly positive evaluation times.
   t_eval_pos <- t_eval[t_eval > 0]
   if (length(t_eval_pos) == 0L) {
@@ -68,6 +78,7 @@ aiptw_cox_estimate_inner <- function(surv.df, ps_spec, out_spec,
   ate_fit <- riskRegression::ate(
     event     = cox_fit,
     treatment = ps_fit,
+    censor    = cens_fit,
     data      = df,
     times     = t_eval_pos,
     cause     = 1,

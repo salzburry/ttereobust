@@ -1,24 +1,18 @@
 ## utils/load_config.R
 ##
 ## Reads a DGM YAML file and returns a list of parameters in the shape
-## sim_surv_data() and compute_truth() already expect (legacy R parameter
-## file names like coeff.A, coeff.L, alpha.L, gamma.tte, ...).
+## sim_surv_data() and compute_truth() already expect.
 ##
-## The YAML schema is human-readable: hazard ratios + scaling factors are
-## stored separately (mirroring the working group's config.yml shape) and
-## the loader translates them into log-coefficients via
-##     coeff.X = log(hazard_ratio.X) * scaling.X
-##
-## Only the `yaml` package is required at runtime. The loader tolerates
-## a missing default.yml gracefully but will stop if the requested config
-## omits required keys.
+## The yaml package is checked at call time (not at source time) so that
+## sourcing this file is harmless on hosts where yaml is not installed.
+## A PLR-only run that never invokes read_dgm_yaml() works without yaml.
 
-suppressPackageStartupMessages({
+require_yaml <- function() {
   if (!requireNamespace("yaml", quietly = TRUE)) {
     stop("Package 'yaml' is required for --config support. ",
          "Install with install.packages('yaml').")
   }
-})
+}
 
 
 ## Deep-merge two named lists (override wins on key collision). Used to
@@ -44,6 +38,7 @@ read_dgm_yaml <- function(config_path,
                            default_path = file.path(
                              dirname(config_path), "default.yml"
                            )) {
+  require_yaml()
   if (!file.exists(config_path)) {
     stop("Config file not found: ", config_path)
   }
@@ -54,7 +49,27 @@ read_dgm_yaml <- function(config_path,
     raw <- deep_merge(defaults, raw)
   }
   validate_dgm_yaml(raw, config_path)
-  yaml_to_dgm_params(raw)
+  out <- yaml_to_dgm_params(raw)
+  out$config_path <- normalizePath(config_path)
+  out
+}
+
+
+## Hash a DGM parameter list to a deterministic fingerprint, used by the
+## driver's .cfg sidecar to detect YAML CONTENT changes (not just path
+## changes). Falls back to base R if `digest` is not available.
+hash_dgm_params <- function(dgm_params) {
+  # Drop transient/path fields so the hash reflects only DGM content.
+  d <- dgm_params
+  d$config_path <- NULL
+  if (requireNamespace("digest", quietly = TRUE)) {
+    return(digest::digest(d))
+  }
+  # Base-R fallback: serialize to a tmpfile and md5 it.
+  tmp <- tempfile()
+  on.exit(unlink(tmp), add = TRUE)
+  saveRDS(d, tmp)
+  unname(tools::md5sum(tmp))
 }
 
 
