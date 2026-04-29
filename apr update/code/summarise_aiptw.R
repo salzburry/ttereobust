@@ -76,9 +76,15 @@ main <- function() {
 
   # Validate raw <-> truth alignment BEFORE the join so a stale or missing
   # truth file fails loudly instead of silently producing NA bias / NaN
-  # coverage downstream. Guards against the case where results/raw/ and
-  # results/truth/ get out of sync (e.g. partial deletions or an old run
-  # whose truth was never produced).
+  # coverage downstream.
+  #
+  # Two layers of validation:
+  #   (1) Scenario-level: every raw scenario_id must appear in truth.
+  #   (2) Row-level: every (scenario_id, t, target) triple in the raw
+  #       output must match a row in truth_long. A truth CSV that has
+  #       the right scenario_id but is missing t = 5 or t = 10 (e.g. an
+  #       older partial output) would otherwise produce NA truth and
+  #       NaN performance metrics after the join.
   raw_scenarios   <- unique(reps$scenario_id)
   truth_scenarios <- unique(truth$scenario_id)
   missing_truth   <- setdiff(raw_scenarios, truth_scenarios)
@@ -93,6 +99,23 @@ main <- function() {
   if (length(orphan_truth) > 0L) {
     warning("Truth CSVs with no matching raw scenario (will be ignored): ",
             paste(orphan_truth, collapse = ", "), call. = FALSE)
+  }
+
+  reps_keys  <- dplyr::distinct(
+    reps[, c("scenario_id", "t", "target"), drop = FALSE]
+  )
+  truth_keys <- dplyr::distinct(
+    truth_long[, c("scenario_id", "t", "target"), drop = FALSE]
+  )
+  missing_rows <- dplyr::anti_join(
+    reps_keys, truth_keys,
+    by = c("scenario_id", "t", "target")
+  )
+  if (nrow(missing_rows) > 0L) {
+    msg <- utils::capture.output(print(utils::head(missing_rows, 10)))
+    stop("Truth rows missing for some (scenario_id, t, target) triples ",
+         "(stale or partial truth CSV). First missing rows:\n",
+         paste(msg, collapse = "\n"))
   }
 
   joined <- reps %>%

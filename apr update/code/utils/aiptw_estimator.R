@@ -168,8 +168,26 @@ aiptw_bootstrap <- function(surv.df, ps_spec, out_spec,
                              B            = 200,
                              ci_level     = 0.95) {
 
+  stopifnot(is.numeric(B), length(B) == 1L, B >= 0L)
   N <- nrow(surv.df)
   alpha <- (1 - ci_level) / 2
+
+  # B = 0 fast path: skip resampling and emit NA SE / CIs directly. Used
+  # by smoke tests that want point estimates only. Without this guard the
+  # downstream do.call(rbind, list()) returns NULL and group_by() errors.
+  if (B == 0L) {
+    return(data.frame(
+      t             = rep(t_eval, 3),
+      target        = rep(c("S0", "S1", "RD"), each = length(t_eval)),
+      n_boot_total  = 0L,
+      n_boot_ok     = 0L,
+      n_boot_failed = 0L,
+      se            = NA_real_,
+      ci_lo         = NA_real_,
+      ci_hi         = NA_real_,
+      stringsAsFactors = FALSE
+    ))
+  }
 
   # Each bootstrap returns a (length(t_eval) x 3) data frame; stack into
   # a long table keyed by (b, t, target).
