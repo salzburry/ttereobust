@@ -34,10 +34,23 @@ apr update/code/
 From `apr update/code/`:
 
 ```bash
-# Smoke test (a few scenarios, small R and B)
-Rscript simulate_aiptw.R --R 50 --B 50 --dgm ph --misspec both_correct,miss_W_ps
+# Single-fit timing test (one rep, no bootstrap, one scenario)
+# Use this FIRST on any new pod to measure per-fit cost. Should
+# finish in seconds. If not, the pod is CPU-throttled or
+# --rescale-time needs to be coarsened.
+Rscript simulate_aiptw.R --R 1 --B 0 \
+  --dgm ph --misspec both_correct --rho 0 --overwrite
 
-# Full protocol grid (DGMs x misspec x rho)
+# Quick smoke test (a few scenarios, small R and B). Note this
+# expands to 6 scenarios (2 misspec x 3 rho levels) x 50 reps x
+# 51 fits per rep = 15,300 fits, so it is NOT a fast test on a
+# single CPU. Add --rho 0 (single rho level) and/or
+# --rescale-time 1 (10 time periods instead of 40) for a faster
+# development run.
+Rscript simulate_aiptw.R --R 50 --B 50 \
+  --dgm ph --misspec both_correct,miss_W_ps
+
+# Full protocol grid (3 DGMs x 5 misspec x 3 rho = 45 scenarios)
 Rscript simulate_aiptw.R --R 1900 --B 200 --workers 8
 
 # Aggregate into protocol metrics
