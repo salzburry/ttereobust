@@ -42,9 +42,13 @@ aiptw_estimate <- function(surv.df,
       time        = interval_ends
     )
 
-    # Long-format (person-period)
+    # Long-format (person-period). Use unqualified Surv(...) on the LHS:
+    # survSplit() parses the formula's LHS by looking for an unqualified
+    # `Surv` call. Writing `survival::Surv(...)` on the LHS triggers
+    # `Error: left hand side not recognized`. The caller must therefore
+    # have library(survival) attached -- the driver and demo scripts do.
     surv.long.df <- survival::survSplit(
-      survival::Surv(eventtime, event) ~ .,
+      Surv(eventtime, event) ~ .,
       data    = surv.df,
       cut     = split_cuts,
       episode = "time_period"
@@ -54,9 +58,9 @@ aiptw_estimate <- function(surv.df,
       surv.df, id, L1, L1sq, L2, L2sq, L3, L4, L5, L6, O, W
     )
 
-    # Censoring KM at left limit G(t-)
+    # Censoring KM at left limit G(t-). Same Surv() unqualified-LHS rule.
     cens.km <- survival::survfit(
-      survival::Surv(eventtime, 1L - event) ~ 1, data = surv.df
+      Surv(eventtime, 1L - event) ~ 1, data = surv.df
     )
     G_tminus <- summary(
       cens.km, times = pmax(t_eval - 1e-8, 0), extend = TRUE
