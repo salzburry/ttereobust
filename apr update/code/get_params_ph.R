@@ -10,7 +10,7 @@ sigma = diag(8)
  
 # exposure model params - obsolete for truth params
 alpha.L = c(0.5, 0.4, -0.6, 0.4, 0.5, 0.3) # params for exposure model c(L_1, ..., L_{Lcovs.linear + Lcovs.sq})
-alpha.W = 1 # coefficient / log-HRs for outcome model
+alpha.W = 1 # coefficient on W in the exposure logit (sim_data.R)
  
 # outcome model params - have low heterogeneity of risk to get approx proportional on conditional and marginal
 coeff.A = log(0.5)

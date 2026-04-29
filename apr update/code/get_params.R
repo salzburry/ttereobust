@@ -8,7 +8,7 @@ sigma = diag(8)
  
 # exposure model params
 alpha.L = c(0.005, 0.001, -0.3, 0.1, 0.2, 0.15) # params for exposure model c(L_1, ..., L_{Lcovs.linear + Lcovs.sq})
-alpha.W = 1 # coefficient / log-HRs for outcome model
+alpha.W = 1 # coefficient on W in the exposure logit (sim_data.R)
  
 # outcome model params
 coeff.A = log(0.75)
