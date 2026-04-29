@@ -114,6 +114,10 @@ for (sc in unique(est.perf$scenario)) {
 
 
 ## ---- Plot -----------------------------------------------------------------
+## Saved to figs/ so it is visible whether the script is run via Rscript
+## (non-interactive, no graphics device) or sourced inside RStudio.
+
+dir.create("figs", showWarnings = FALSE)
 
 plot.df <- bind_rows(
   all.est %>% transmute(time = t, A = 0L, surv = S0, scenario),
@@ -130,7 +134,7 @@ plot.df <- bind_rows(
                   labels = c("Control (A=0)", "Treatment (A=1)"))
   )
 
-ggplot(plot.df, aes(x = time, y = surv, colour = scenario)) +
+p <- ggplot(plot.df, aes(x = time, y = surv, colour = scenario)) +
   geom_step(linewidth = 0.6) +
   facet_wrap(~A) +
   ylim(0, 1) + xlim(0, admin.cens) +
@@ -142,3 +146,10 @@ ggplot(plot.df, aes(x = time, y = surv, colour = scenario)) +
   ggtitle("AIPTW-PLR: Marginal Survival by Misspecification Scenario",
           subtitle = sprintf("N = %d  |  one dataset  |  no bootstrap",
                               simN))
+
+# Print so it shows up in interactive mode, AND save so it shows up in
+# non-interactive mode.
+print(p)
+out_path <- file.path("figs", "aiptw_discrete_misspec_curves.png")
+ggsave(out_path, p, width = 9, height = 5, dpi = 120)
+message("[plot] wrote ", out_path)
