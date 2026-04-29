@@ -92,6 +92,15 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
       { stop("Unknown CLI argument: ", a) }
     )
   }
+
+  # Fail fast on obviously invalid --rescale-time. Per-DGM check (does
+  # admin.cens divide evenly) happens at scenario start where admin.cens
+  # is known.
+  if (!is.finite(defaults$rescale_time) || defaults$rescale_time <= 0) {
+    stop("--rescale-time must be a positive finite number; got ",
+         defaults$rescale_time)
+  }
+
   defaults
 }
 
@@ -188,6 +197,18 @@ run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
 ##     the run completes.
 
 run_one_scenario <- function(scenario_row, dgm_params, opts) {
+
+  # Validate that admin.cens is an integer multiple of rescale_time. If
+  # not, the discrete-time grid does not land on admin.cens and the
+  # final evaluation point uses an earlier interval's Q while the IPCW
+  # outcome is taken at admin.cens, biasing the t = admin.cens estimate.
+  ratio <- dgm_params$admin.cens / opts$rescale_time
+  if (abs(ratio - round(ratio)) > 1e-9) {
+    stop(sprintf(
+      "--rescale-time (%g) does not divide admin.cens (%g) evenly. Use a value such as 0.25, 0.5, 1, or 2.",
+      opts$rescale_time, dgm_params$admin.cens
+    ))
+  }
 
   rho_L <- scenario_row$rho_L
   sigma_use <- make_sigma(rho_L = rho_L,
@@ -325,7 +346,10 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
 
 main <- function() {
   opts <- parse_cli_args()
-  set_parallel_plan(opts$n_workers)
+  # Capture the actual worker count after parallelly capping, otherwise
+  # main() would still pass the requested count to run_replications and
+  # take the silent furrr branch on a 1-CPU pod where the cap kicked in.
+  opts$n_workers <- set_parallel_plan(opts$n_workers)
 
   grid <- build_scenario_grid(
     dgms     = if (is.null(opts$dgm))     names(dgm_param_files) else opts$dgm,
@@ -340,12 +364,44 @@ main <- function() {
   # DGM params are per-DGM (not per-rho); cache to avoid re-sourcing
   dgm_cache <- new.env(parent = emptyenv())
 
+  # Config that affects raw output content. Stored beside each scenario
+  # CSV as a .cfg sidecar so we can detect and refuse to mix runs from
+  # different settings (e.g. resuming a smoke run as a protocol run, or
+  # changing --rescale-time / --N / --base-seed mid-run, which would
+  # silently combine incompatible rows).
+  current_cfg <- list(
+    N            = opts$N,
+    R            = opts$R,
+    B            = opts$B,
+    rescale_time = opts$rescale_time,
+    base_seed    = opts$base_seed
+  )
+
   for (i in seq_len(nrow(grid))) {
     sc <- as.list(grid[i, ])
 
     raw_path   <- file.path(RAW_DIR,   paste0(sc$scenario_id, ".csv"))
     truth_path <- file.path(TRUTH_DIR, paste0(sc$scenario_id, ".csv"))
     rep_dir    <- file.path(RAW_DIR,   sc$scenario_id)
+    cfg_path   <- file.path(RAW_DIR,   paste0(sc$scenario_id, ".cfg"))
+
+    # If a completed scenario or partial checkpoint exists, refuse to
+    # touch it unless the previously-stored config matches the current
+    # one (or --overwrite is set). Without this check, running the
+    # README smoke test (R=50/B=50) and then the protocol grid
+    # (R=1900/B=200) silently reuses smoke rows as protocol rows.
+    if (file.exists(cfg_path) && !opts$overwrite) {
+      prev_cfg  <- dget(cfg_path)
+      diff_keys <- names(current_cfg)[
+        !mapply(identical, current_cfg, prev_cfg[names(current_cfg)])
+      ]
+      if (length(diff_keys) > 0L) {
+        stop(sprintf(
+          "[%s] existing scenario was produced with a different config (differs in: %s). Re-run with --overwrite or remove the stale outputs.",
+          sc$scenario_id, paste(diff_keys, collapse = ", ")
+        ))
+      }
+    }
 
     if (file.exists(raw_path) && !opts$overwrite) {
       message(sprintf("[skip] %s exists (use --overwrite to redo)", raw_path))
@@ -358,8 +414,15 @@ main <- function() {
     if (opts$overwrite) {
       if (file.exists(raw_path))   unlink(raw_path)
       if (file.exists(truth_path)) unlink(truth_path)
+      if (file.exists(cfg_path))   unlink(cfg_path)
       if (dir.exists(rep_dir))     unlink(rep_dir, recursive = TRUE)
     }
+
+    # Write the config sidecar BEFORE running so that an interrupted run
+    # leaves both the partial rep_dir and the canonical cfg behind, and a
+    # subsequent invocation can validate them against each other before
+    # resuming.
+    dput(current_cfg, file = cfg_path)
 
     if (!exists(sc$dgm, envir = dgm_cache, inherits = FALSE)) {
       assign(sc$dgm, load_dgm_params(sc$dgm, code_dir = CODE_DIR),
