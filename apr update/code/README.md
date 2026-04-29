@@ -18,8 +18,11 @@ apr update/code/
 ├── get_params_waning.R      Waning-effect DGM parameters
 ├── simulate_aiptw.R         Main replication driver
 ├── summarise_aiptw.R        Performance aggregator
-├── aiptw_discrete.R         Single-scenario interactive demo
-├── aiptw.R                  Continuous-time / Cox-outcome AIPTW variant
+├── aiptw_discrete.R         Interactive demo: AIPTW-PLR across the 5
+│                             main misspec scenarios on one dataset
+│                             (uses utils/aiptw_estimator.R + scenarios.R).
+├── aiptw.R                  Interactive demo: AIPTW-Cox (continuous-time
+│                             outcome variant; not in the harness).
 └── results/                 (gitignored) raw replication output and summary
     ├── raw/
     ├── truth/

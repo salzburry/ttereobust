@@ -1,543 +1,186 @@
-## =============================================================================
 ## aiptw.R
-## Augmented Inverse Probability of Treatment Weighting (AIPTW)
-## for Survival Outcomes
 ##
-## Two estimators are implemented:
+## AIPTW-Cox: continuous-time variant of the AIPTW estimator that uses an
+## unweighted Cox PH outcome model combined with the explicit AIPTW
+## augmentation term and IPCW correction (marginal KM under independent
+## censoring).
 ##
-##  1. AIPTW-PLR
-##     Weighted pooled logistic regression (PLR) with the canonical logit link
-##     followed by regression standardisation. By the result of Blanche et al.
-##     (2023) and Gabriel et al. (2024, Stat Med) this is algebraically
-##     equivalent to the classical AIPTW / AIPW estimator. The logit link is
-##     the canonical link for the Bernoulli likelihood; using a non-canonical
-##     link such as cloglog (as in the DR-Standardisation in analysis.R) breaks
-##     the double-robustness property.
+## Adds value over aiptw_discrete.R / utils/aiptw_estimator.R, which use
+## a discrete-time logit-PLR outcome model (the canonical link for the
+## AIPTW algebraic-equivalence result, Gabriel et al. 2024). This script
+## is the "Cox outcome" comparison arm.
 ##
-##  2. AIPTW-Cox
-##     Unweighted Cox PH outcome model combined with the explicit AIPTW
-##     augmentation term. Independent censoring is handled via IPCW using the
-##     Kaplan-Meier estimator of the censoring distribution.
+## Formula:
+##   S^a_AIPTW(t) = (1/n) sum_i {
+##       Q_i(a, t)  +  [I(A_i = a) / pi_i(a)]  *  [Y~_i(t) - Q_i(a, t)]
+##   }
+## with
+##   Q_i(a, t) = exp(-H0(t) * exp(LP_i(a)))
+##   pi_i(a)   = P(A_i = a | L_i)                trimmed propensity
+##   Y~_i(t)   = I(T~_i >= t) / G(t-)            IPCW-corrected outcome
 ##
-##     Formula (Bang & Robins 2005; Kurz 2022):
-##       S^a_AIPTW(t) = (1/n) sum_i {
-##           Q_i(a,t)  +  [I(A_i=a)/pi_i(a)]  *  [Y~_i(t) - Q_i(a,t)]
-##       }
-##     where
-##       Q_i(a,t)  = exp(-H0(t) * exp(LP_i(a)))     Cox predicted survival
-##       pi_i(a)   = P(A_i = a | L_i)                propensity score
-##       Y~_i(t)   = I(T~_i > t) / G(t)              IPCW-corrected outcome
-##       G(t)      = KM censoring survival at t
-##
-## Double robustness: consistent if EITHER the propensity score model OR the
-## outcome model is correctly specified.
-##
-## Misspecification scenarios (per protocol Section 6.4):
-##   Exposure:  correct / missing W / wrong functional form / heavy
-##   Outcome:   correct / missing O,W / wrong functional form / heavy
-##
-## References:
-##   Bang & Robins (2005) Biometrics
-##   Funk et al. (2011) Am J Epidemiol
-##   Kurz (2022) Med Decis Making
-##   Blanche et al. (2023) Lifetime Data Anal
-##   Gabriel et al. (2024) Stat Med
-## =============================================================================
+## For protocol-grade replicated runs use simulate_aiptw.R (logit-PLR
+## variant). The Cox variant has not been wired into the harness; this
+## script is a single-dataset interactive demo.
 
-
-# ---- Libraries ---------------------------------------------------------------
-
-library(survival)
-library(dplyr)
-library(ggplot2)
-library(MASS)
-library(purrr)
+suppressPackageStartupMessages({
+  library(survival); library(dplyr); library(ggplot2); library(MASS)
+})
 
 source("utils/sim_data.R")
+source("utils/compute_truth.R")
+source("utils/scenarios.R")
 
 
-# ---- Simulation parameters ---------------------------------------------------
+## ---- AIPTW-Cox estimator --------------------------------------------------
+##
+## Pure function: takes one dataset and the spec strings, returns a data
+## frame with t / S0 / S1 / RD on the requested grid.
 
-simN <- 2500   # protocol Section 6.2
+run_aiptw_cox <- function(surv.df, ps_spec, out_spec,
+                           t_eval, admin.cens,
+                           ps_trim = c(0.01, 0.99)) {
 
-# Uncomment the desired data-generating scenario:
+  # Propensity score (trimmed)
+  ps.mod <- glm(as.formula(paste("A ~", ps_spec)),
+                family = "binomial", data = surv.df)
+  pi_1 <- pmin(pmax(predict(ps.mod, type = "response"),
+                    ps_trim[1]), ps_trim[2])
+  ipw_ind1 <- ifelse(surv.df$A == 1L, 1 / pi_1,       0)
+  ipw_ind0 <- ifelse(surv.df$A == 0L, 1 / (1 - pi_1), 0)
+
+  # Cox outcome model + baseline cumulative hazard (with H0(0) = 0
+  # prepended so survival starts at 1 exactly).
+  cox.mod <- coxph(as.formula(paste("Surv(eventtime, event) ~", out_spec)),
+                   data = surv.df, ties = "breslow", x = TRUE)
+  H0 <- rbind(data.frame(time = 0, hazard = 0),
+              basehaz(cox.mod, centered = FALSE))
+  lp0 <- predict(cox.mod, newdata = mutate(surv.df, A = 0), type = "lp")
+  lp1 <- predict(cox.mod, newdata = mutate(surv.df, A = 1), type = "lp")
+  h0_all <- approx(H0$time, H0$hazard, xout = t_eval,
+                   method = "constant", f = 0, rule = 2)$y
+
+  # IPCW G(t-) (left limit; avoids divide-by-zero at admin.cens)
+  cens.km <- survfit(Surv(eventtime, 1L - event) ~ 1, data = surv.df)
+  G_tminus <- pmax(
+    summary(cens.km, times = pmax(t_eval - 1e-8, 0), extend = TRUE)$surv,
+    1e-6
+  )
+
+  obs_time <- surv.df$eventtime
+  do.call(rbind, lapply(seq_along(t_eval), function(k) {
+    t_k <- t_eval[k]
+    if (t_k == 0) return(data.frame(t = 0, S0 = 1, S1 = 1, RD = 0))
+    Q0 <- exp(-h0_all[k] * exp(lp0))
+    Q1 <- exp(-h0_all[k] * exp(lp1))
+    Y_ipcw <- as.numeric(obs_time >= t_k) / G_tminus[k]
+    S0 <- mean(Q0 + ipw_ind0 * (Y_ipcw - Q0))
+    S1 <- mean(Q1 + ipw_ind1 * (Y_ipcw - Q1))
+    data.frame(t = t_k, S0 = S0, S1 = S1, RD = S1 - S0)
+  }))
+}
+
+
+## ---- Configuration --------------------------------------------------------
+
+simN   <- 2500                          # protocol Section 6.2
+t.eval <- seq(0, 10, 0.1)               # plot grid
+t.perf <- c(1, 5, 10)                   # protocol Section 6.3
+
+# Active scenario (any pair of names from utils/scenarios.R)
+ps.idx  <- "correct"
+out.idx <- "correct"
+
+# Uncomment desired DGM:
 # source("get_params_waning.R")
 # source("get_params_delayed.R")
 source("get_params_ph.R")
 
-rescale_time  <- 1/4                                  # quarter-year intervals
-# Discrete-time interval setup (mirror aiptw_discrete.R). interval_ends are
-# the right endpoints (0.25, 0.5, ..., admin.cens). split_cuts excludes the
-# admin.cens endpoint so survSplit does not produce an empty trailing
-# interval, and excludes 0 because survSplit treats time 0 as the implicit
-# start of the first interval -- passing 0 as a cut shifts time_period
-# labels and causes boundary mis-alignment at t = 0.
-interval_ends <- seq(rescale_time, admin.cens, by = rescale_time)
-split_cuts    <- interval_ends[-length(interval_ends)]
-cutpoints     <- interval_ends                        # legacy alias
-t.eval        <- seq(0, admin.cens, 0.1)              # grid for plotting
 
+## ---- Truth & dataset ------------------------------------------------------
 
-# ---- Model specification scenarios (per protocol Section 6.4) ----------------
-#
-# After the Apr 28 DGM update, the truth has:
-#   - Exposure logit linear in L1..L6 + W
-#   - Outcome hazard linear in L1..L6 AND quadratic in L1, L2, with O and W
-# Specs are aligned accordingly. See aiptw_discrete.R for the canonical
-# discrete-time AIPTW; this script keeps an additional Cox-outcome variant.
-
-exposure.covs <- c(
-  "L1 + L2 + L3 + L4 + L5 + L6 + W",                       # 1: correct
-  "L1 + L2 + L3 + L4 + L5 + L6",                           # 2: missing W
-  "L1sq + L2sq + L3 + L4 + L5 + L6 + W",                   # 3: wrong functional form
-  "L3 + L4 + L5"                                            # 4: heavy misspecification
+dgm_params <- list(
+  N.Lcovs.linear = N.Lcovs.linear, N.Lcovs.sq = N.Lcovs.sq,
+  mu = mu, sigma = sigma,
+  alpha.L = alpha.L, alpha.W = alpha.W,
+  coeff.A = coeff.A, coeff.L = coeff.L, coeff.Lsq = coeff.Lsq,
+  coeff.O = coeff.O, coeff.W = coeff.W,
+  gamma.tte = gamma.tte, lambda.tte = lambda.tte,
+  lambda.cens = lambda.cens, admin.cens = admin.cens
 )
 
-outcome.covs <- c(
-  "A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + O + W", # 1: correct (full truth)
-  "A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + W",     # 2: missing O
-  "A + L1 + L2 + L3 + L4 + L5 + L6 + O + W",               # 3: wrong functional form
-  "A + L3 + L4 + L5"                                        # 4: heavy misspecification
-)
-
-# Active scenario indices (1 = correctly specified)
-exp.idx <- 1
-out.idx <- 1
-
-
-# ---- Generate true marginal survival curves ----------------------------------
-# Use a very large sample to approximate the population-level truth via
-# the Weibull g-computation integral (same method as analysis.R / gen_truth.R).
-
-message("Generating true survival curves (N = 500,000)...")
-
-true.df1 <- sim_surv_data(
-  seed          = this.seed,  N             = 500000,
-  Lcovs.linear  = N.Lcovs.linear,  Lcovs.sq = N.Lcovs.sq,
-  mu            = mu,               sigma    = sigma,
-  alpha.L       = alpha.L,          alpha.W  = alpha.W,
-  coeff.A       = coeff.A,          coeff.L  = coeff.L,
-  coeff.Lsq     = coeff.Lsq,        coeff.O  = coeff.O,
-  coeff.W       = coeff.W,
-  gamma.tte     = gamma.tte,  lambda.tte  = lambda.tte,
-  lambda.cens   = lambda.cens, admin.cens = admin.cens,
-  gen.truth     = 1
-)
-
-cov.mat   <- true.df1$cov.mat
-cov.mat.L <- cov.mat[, 1:(N.Lcovs.linear + N.Lcovs.sq)]
-
-# Pre-compute individual linear predictors (avoids recomputation inside sapply)
-lin_pred_1 <- as.vector(
-  coeff.A +
-  cov.mat.L %*% coeff.L +
-  cov.mat.L[, 1:2]^2 %*% coeff.Lsq[1:2] +
-  coeff.O * cov.mat[, "O"] +
-  coeff.W * cov.mat[, "W"]
-)
-lin_pred_0 <- lin_pred_1 - coeff.A   # set A = 0
-
-surv1_wei <- sapply(t.eval, function(t)
-  mean(exp(-lambda.tte * t^gamma.tte * exp(lin_pred_1))))
-surv0_wei <- sapply(t.eval, function(t)
-  mean(exp(-lambda.tte * t^gamma.tte * exp(lin_pred_0))))
-
-true.surv.df <- data.frame(
-  time   = rep(t.eval, 2),
-  A      = rep(c(0L, 1L), each = length(t.eval)),
-  surv   = c(surv0_wei, surv1_wei),
-  method = "True Weibull"
-)
-
-
-# ---- Generate analysis dataset -----------------------------------------------
+message("Computing analytic Weibull truth...")
+truth.fine <- compute_truth(t_eval = t.eval, dgm = dgm_params)
+truth.perf <- compute_truth(t_eval = t.perf, dgm = dgm_params)
 
 message("Simulating analysis dataset (N = ", simN, ")...")
+sim <- sim_surv_data(
+  seed = this.seed, N = simN,
+  Lcovs.linear = N.Lcovs.linear, Lcovs.sq = N.Lcovs.sq,
+  mu = mu, sigma = sigma,
+  alpha.L = alpha.L, alpha.W = alpha.W,
+  coeff.A = coeff.A, coeff.L = coeff.L, coeff.Lsq = coeff.Lsq,
+  coeff.O = coeff.O, coeff.W = coeff.W,
+  gamma.tte = gamma.tte, lambda.tte = lambda.tte,
+  lambda.cens = lambda.cens, admin.cens = admin.cens
+)
+surv.df <- sim$data
 
-sim.df <- sim_surv_data(
-  seed         = this.seed,  N            = simN,
-  Lcovs.linear = N.Lcovs.linear,  Lcovs.sq = N.Lcovs.sq,
-  mu           = mu,               sigma    = sigma,
-  alpha.L      = alpha.L,          alpha.W  = alpha.W,
-  coeff.A      = coeff.A,          coeff.L  = coeff.L,
-  coeff.Lsq    = coeff.Lsq,        coeff.O  = coeff.O,
-  coeff.W      = coeff.W,
-  gamma.tte    = gamma.tte,  lambda.tte  = lambda.tte,
-  lambda.cens  = lambda.cens, admin.cens = admin.cens,
-  gen.truth    = NA
+
+## ---- Run AIPTW-Cox --------------------------------------------------------
+
+est <- run_aiptw_cox(
+  surv.df,
+  ps_spec    = ps.specs[[ps.idx]],
+  out_spec   = out.specs[[out.idx]],
+  t_eval     = t.eval,
+  admin.cens = admin.cens
 )
 
-surv.df <- sim.df$data
-
-# Long format (person-period) for discrete-time models. Use split_cuts
-# (interior cuts only) so every interval is non-empty and time_period
-# labels align cleanly with interval_mapping$time below.
-surv.long.df <- survSplit(
-  Surv(eventtime, event) ~ .,
-  data    = surv.df,
-  cut     = split_cuts,
-  episode = "time_period"
-)
-
-# Time-period to calendar-time mapping (period k ends at interval_ends[k]).
-interval_mapping <- data.frame(
-  time_period = seq_along(interval_ends),
-  time        = interval_ends
-)
-
-# Baseline covariate lookup (used when building prediction grids)
-baseline.covs <- dplyr::select(
-  surv.df, id, L1, L1sq, L2, L2sq, L3, L4, L5, L6, O, W
+est.perf <- run_aiptw_cox(
+  surv.df,
+  ps_spec    = ps.specs[[ps.idx]],
+  out_spec   = out.specs[[out.idx]],
+  t_eval     = t.perf,
+  admin.cens = admin.cens
 )
 
 
-# ---- Censoring survival for IPCW (AIPTW-Cox only) ---------------------------
-# Reverse the event indicator: censored observations become "events" for KM.
-# G(t) = P(C > t) under independent censoring.
-#
-# IPCW uses the LEFT-LIMIT G(t-) evaluated just before t. At t = admin.cens,
-# G(t) can be 0 (or near-zero) because of the mass of admin-censoring at maxT,
-# making it an unstable denominator. G(t-) avoids that. Mirrors the treatment
-# in aiptw_discrete.R.
+## ---- Performance ---------------------------------------------------------
 
-cens.km      <- survfit(Surv(eventtime, 1L - event) ~ 1, data = surv.df)
-G_tminus_vec <- summary(cens.km,
-                         times  = pmax(t.eval - 1e-8, 0),
-                         extend = TRUE)$surv
-G_tminus_vec <- pmax(G_tminus_vec, 1e-6)   # guard against exact zero
-
-
-# ---- IPTW weights (reused from colleague's IPTW code in analysis.R) ----------
-
-compute_iptw <- function(exposure.formula.str, surv.df, surv.long.df,
-                          ps.trim = c(0.01, 0.99)) {
-
-  # Denominator: P(A | L)
-  ps.mod  <- glm(as.formula(paste("A ~", exposure.formula.str)),
-                 family = "binomial", data = surv.df)
-  # Trim P(A=1|L) to [ps.trim[1], ps.trim[2]] to bound extreme weights.
-  pi_1    <- pmin(pmax(predict(ps.mod, type = "response"),
-                       ps.trim[1]), ps.trim[2])
-
-  # Marginal P(A=1) for stabilisation (scalar)
-  pi_marg <- mean(surv.df$A == 1L)
-
-  # Stabilised weight: P(A_i) / P(A_i | L_i)
-  wt_denom <- ifelse(surv.df$A == 1L, pi_1,       1 - pi_1)
-  wt_num   <- ifelse(surv.df$A == 1L, pi_marg, 1 - pi_marg)
-  ipw_s    <- wt_num / wt_denom
-
-  # Merge weights into long-format data (treatment is time-fixed, so the
-  # same weight applies to every time-row of a given individual)
-  wt.df <- data.frame(id = surv.df$id, ipw_s = ipw_s)
-  survwt.long.df <- left_join(surv.long.df, wt.df, by = "id")
-
-  list(
-    ps.mod         = ps.mod,
-    pi_1           = pi_1,           # P(A=1|L) for every individual
-    ipw_s          = ipw_s,          # stabilised weights (wide, one per person)
-    survwt.long.df = survwt.long.df  # long-format with ipw_s column
-  )
+cat(sprintf("\nAIPTW-Cox  (PS = %s | Outcome = %s)\n", ps.idx, out.idx))
+cat(strrep("-", 40), "\n", sep = "")
+for (k in seq_len(nrow(truth.perf))) {
+  e <- est.perf[which.min(abs(est.perf$t - truth.perf$t[k])), ]
+  cat(sprintf("  t=%2g  S0=%.4f (true %.4f)  S1=%.4f (true %.4f)  RD=%+.4f (true %+.4f)\n",
+              truth.perf$t[k],
+              e$S0, truth.perf$S0[k],
+              e$S1, truth.perf$S1[k],
+              e$RD, truth.perf$RD[k]))
 }
 
 
-# ---- AIPTW-PLR ---------------------------------------------------------------
-#
-# Step 1: Fit PLR on long-format data weighted by IPTW using the CANONICAL
-#         logit link.  The logit link is the natural exponential family link for
-#         the Bernoulli distribution.  Gabriel et al. (2024, Stat Med) prove
-#         that IPTW-weighted GLM with a canonical link, followed by regression
-#         standardisation, is algebraically equivalent to the AIPW estimator.
-#         Using a non-canonical link (cloglog) breaks this equivalence.
-#
-# Step 2: Build a full counterfactual prediction grid (every individual x every
-#         time-period x each treatment arm) and obtain discrete hazard
-#         predictions from the fitted model.
-#
-# Step 3: Compute individual cumulative survival: cumprod(1 - hazard).
-#
-# Step 4: Standardise (average) individual survival curves over the empirical
-#         covariate distribution to obtain the marginal survival curve.
+## ---- Plot ----------------------------------------------------------------
 
-run_aiptw_plr <- function(outcome.covs.str, survwt.long.df,
-                           baseline.covs, interval_mapping, method.name) {
-
-  plr.formula <- as.formula(
-    paste0("event ~ ", outcome.covs.str, " + as.factor(time_period)")
-  )
-
-  # Weighted PLR — quasibinomial to accommodate non-integer weights
-  # CRITICAL: logit link (canonical), NOT cloglog
-  plr.mod <- glm(
-    plr.formula,
-    data    = survwt.long.df,
-    family  = quasibinomial(link = "logit"),
-    weights = ipw_s
-  )
-
-  # Full counterfactual prediction grid
-  time_periods <- sort(unique(survwt.long.df$time_period))
-
-  pred.df <- expand.grid(
-    id          = baseline.covs$id,
-    time_period = time_periods,
-    A           = c(0L, 1L),
-    KEEP.OUT.ATTRS = FALSE
-  ) %>%
-    left_join(baseline.covs, by = "id") %>%
-    mutate(event = 0L)
-
-  pred.df$haz <- predict(plr.mod, newdata = pred.df, type = "response")
-
-  # Individual cumulative survival
-  pred.df <- pred.df %>%
-    arrange(id, A, time_period) %>%
-    group_by(id, A) %>%
-    mutate(csurv = cumprod(1 - haz)) %>%
-    ungroup()
-
-  # Marginalise over individuals, map to calendar time, prepend t = 0
-  pred.df %>%
-    group_by(time_period, A) %>%
-    summarise(surv = mean(csurv), .groups = "drop") %>%
-    left_join(dplyr::select(interval_mapping, time_period, time),
-              by = "time_period") %>%
-    bind_rows(
-      data.frame(time_period = NA_integer_, A = c(0L, 1L), surv = 1, time = 0),
-      .
-    ) %>%
-    arrange(A, time) %>%
-    mutate(method = method.name) %>%
-    dplyr::select(time, A, surv, method)
-}
-
-
-# ---- AIPTW-Cox ---------------------------------------------------------------
-#
-# Fits an unweighted Cox PH outcome model and applies the explicit AIPTW
-# augmentation term with IPCW correction for independent right censoring:
-#
-#   S^a_AIPTW(t) = (1/n) sum_i {
-#       Q_i(a,t)  +  [I(A_i=a) / pi_i(a)]  *  [Y~_i(t)  -  Q_i(a,t)]
-#   }
-#
-# Q_i(a,t) is obtained from the Cox baseline cumulative hazard and the
-# individual linear predictors, avoiding expensive per-individual survfit calls:
-#   Q_i(a,t) = exp( -H0(t) * exp(LP_i(a)) )
-#
-# Y~_i(t) = I(T~_i >= t) / G(t-) is the IPCW-corrected observed outcome.
-# Using >= (not >) keeps individuals admin-censored exactly at t = maxT in the
-# "still surviving" set; G(t-) avoids dividing by ~0 at the admin boundary.
-# Under independent censoring the marginal KM estimate of G suffices.
-#
-# H0(0) is forced to 0 so the survival curve is exactly 1 at t = 0;
-# approx() with rule = 2 alone returns the first observed baseline-hazard
-# value at t = 0 instead, which is non-zero.
-#
-# NOTE: the Cox model is unweighted — the IPW enters only through the
-# explicit augmentation term, not through the outcome model itself.
-
-run_aiptw_cox <- function(outcome.covs.str, surv.df, pi_1, G_tminus_vec,
-                           t.eval, method.name) {
-
-  cox.formula <- as.formula(
-    paste0("Surv(eventtime, event) ~ ", outcome.covs.str)
-  )
-
-  # Unweighted Cox outcome model
-  cox.mod <- coxph(cox.formula, data = surv.df, ties = "breslow", x = TRUE)
-
-  # Baseline cumulative hazard H0(t), un-centred. Prepend (0, 0) so that
-  # H0(0) = 0 exactly under the step interpolation below.
-  H0 <- basehaz(cox.mod, centered = FALSE)
-  H0 <- rbind(data.frame(time = 0, hazard = 0), H0)
-
-  # Linear predictors under each counterfactual treatment arm
-  lp0 <- predict(cox.mod, newdata = mutate(surv.df, A = 0), type = "lp")
-  lp1 <- predict(cox.mod, newdata = mutate(surv.df, A = 1), type = "lp")
-
-  # Unstabilised IPW indicator weights: I(A_i = a) / P(A_i = a | L_i)
-  # (unstabilised is correct for the AIPTW augmentation term)
-  ipw_ind0 <- ifelse(surv.df$A == 0L, 1 / (1 - pi_1), 0)
-  ipw_ind1 <- ifelse(surv.df$A == 1L, 1 / pi_1,       0)
-
-  obs_time <- surv.df$eventtime
-
-  # Pre-compute baseline cumulative hazard at all evaluation points using
-  # right-continuous step interpolation (matches the Nelson-Aalen step
-  # function, unlike linear approx).
-  h0_all <- approx(H0$time, H0$hazard, xout = t.eval,
-                   method = "constant", f = 0, rule = 2)$y
-
-  # Vectorised loop over time points (lapply + rbind faster than map_dfr here)
-  out.list <- lapply(seq_along(t.eval), function(k) {
-
-    t_k <- t.eval[k]
-
-    # t = 0 exactly: survival is 1 by construction; skip augmentation.
-    if (t_k == 0) {
-      return(data.frame(time = 0, A = c(0L, 1L), surv = 1,
-                        method = method.name))
-    }
-
-    h0t      <- h0_all[k]
-    G_tminus <- G_tminus_vec[k]
-
-    # Individual Cox survival predictions: S_i(t|a) = exp(-H0(t)*exp(LP_i(a)))
-    Q0 <- exp(-h0t * exp(lp0))
-    Q1 <- exp(-h0t * exp(lp1))
-
-    # IPCW-corrected observed outcome (>= and G(t-))
-    Y_ipcw <- as.numeric(obs_time >= t_k) / G_tminus
-
-    # AIPTW: g-computation + IPW-weighted residual correction.
-    # Raw values stored; clipping is applied only at plot time so performance
-    # metrics are not biased by saturation at [0, 1].
-    surv0 <- mean(Q0 + ipw_ind0 * (Y_ipcw - Q0))
-    surv1 <- mean(Q1 + ipw_ind1 * (Y_ipcw - Q1))
-
-    data.frame(
-      time   = t_k,
-      A      = c(0L, 1L),
-      surv   = c(surv0, surv1),
-      method = method.name
-    )
-  })
-
-  do.call(rbind, out.list)
-}
-
-
-# ---- Performance evaluation helper -------------------------------------------
-
-eval_performance <- function(res.df, true_S0, true_S1,
-                              t.perf = c(1, 5, 10)) {
-
-  label <- unique(res.df$method)
-  cat("\n", label, "\n", strrep("-", nchar(label)), "\n", sep = "")
-
-  true_list <- list("0" = true_S0, "1" = true_S1)
-
-  for (a in c(0L, 1L)) {
-    sub    <- dplyr::filter(res.df, A == a)
-    true_S <- true_list[[as.character(a)]]
-
-    for (t_pt in t.perf) {
-      idx_true <- which.min(abs(t.eval - t_pt))
-      idx_est  <- which.min(abs(sub$time - t_pt))
-      truth    <- true_S[idx_true]
-      est      <- sub$surv[idx_est]
-      rel_bias <- 100 * (est - truth) / truth
-
-      cat(sprintf("  A=%d  t=%-3g  Est=%.4f  True=%.4f  RelBias=%+.2f%%\n",
-                  a, t_pt, est, truth, rel_bias))
-    }
-  }
-}
-
-
-# ==============================================================================
-# Main analysis (default: both models correctly specified, exp.idx=1, out.idx=1)
-# ==============================================================================
-
-message("\n--- IPTW weights (exposure model ", exp.idx, ") ---")
-iptw.res <- compute_iptw(exposure.covs[exp.idx], surv.df, surv.long.df)
-
-message("--- AIPTW-PLR (outcome model ", out.idx, ") ---")
-aiptw.plr.df <- run_aiptw_plr(
-  outcome.covs.str = outcome.covs[out.idx],
-  survwt.long.df   = iptw.res$survwt.long.df,
-  baseline.covs    = baseline.covs,
-  interval_mapping = interval_mapping,
-  method.name      = sprintf("AIPTW-PLR (exp=%d, out=%d)", exp.idx, out.idx)
-)
-
-message("--- AIPTW-Cox (outcome model ", out.idx, ") ---")
-aiptw.cox.df <- run_aiptw_cox(
-  outcome.covs.str = outcome.covs[out.idx],
-  surv.df          = surv.df,
-  pi_1             = iptw.res$pi_1,
-  G_tminus_vec     = G_tminus_vec,
-  t.eval           = t.eval,
-  method.name      = sprintf("AIPTW-Cox (exp=%d, out=%d)", exp.idx, out.idx)
-)
-
-# Performance at t = 1, 5, 10
-message("\n===== Performance measures =====")
-eval_performance(aiptw.plr.df, surv0_wei, surv1_wei)
-eval_performance(aiptw.cox.df, surv0_wei, surv1_wei)
-
-
-# ==============================================================================
-# Optional: Loop over all 4 x 4 misspecification scenarios
-# (demonstrates double robustness: estimate stays consistent when at least one
-#  model is correctly specified)
-# Uncomment to run.
-# ==============================================================================
-
-# all.aiptw.plr <- list()
-# all.aiptw.cox <- list()
-#
-# for (ei in 1:4) {
-#   for (oi in 1:4) {
-#     key <- paste0("e", ei, "_o", oi)
-#     message("Running scenario: exp=", ei, " out=", oi)
-#
-#     iptw.i <- compute_iptw(exposure.covs[ei], surv.df, surv.long.df)
-#
-#     all.aiptw.plr[[key]] <- run_aiptw_plr(
-#       outcome.covs[oi], iptw.i$survwt.long.df, baseline.covs,
-#       interval_mapping, sprintf("AIPTW-PLR (e%d,o%d)", ei, oi)
-#     )
-#     all.aiptw.cox[[key]] <- run_aiptw_cox(
-#       outcome.covs[oi], surv.df, iptw.i$pi_1, G_tminus_vec, t.eval,
-#       sprintf("AIPTW-Cox (e%d,o%d)", ei, oi)
-#     )
-#   }
-# }
-
-
-# ==============================================================================
-# Visualisation
-# ==============================================================================
-
-plot.df <- bind_rows(true.surv.df, aiptw.plr.df, aiptw.cox.df) %>%
+plot.df <- bind_rows(
+  est        %>% transmute(time = t, A = 0L, surv = S0, method = "AIPTW-Cox"),
+  est        %>% transmute(time = t, A = 1L, surv = S1, method = "AIPTW-Cox"),
+  truth.fine %>% transmute(time = t, A = 0L, surv = S0, method = "True Weibull"),
+  truth.fine %>% transmute(time = t, A = 1L, surv = S1, method = "True Weibull")
+) %>%
   mutate(
-    # Display-only clipping. Raw AIPTW estimates are preserved on the
-    # *.df objects above and used for performance metrics; only the plot
-    # saturates at [0, 1].
-    surv        = pmin(pmax(surv, 0), 1),
-    A           = factor(A, levels = c(0L, 1L),
-                         labels = c("Control (A=0)", "Treatment (A=1)")),
-    method_grp  = sub(" \\(.*", "", method)   # strip scenario label for colour
+    # Display-only clipping; raw estimates are on est / est.perf above.
+    surv = pmin(pmax(surv, 0), 1),
+    A    = factor(A, levels = c(0L, 1L),
+                  labels = c("Control (A=0)", "Treatment (A=1)"))
   )
 
-method.colors <- c(
-  "True Weibull" = "black",
-  "AIPTW-PLR"    = "#E41A1C",
-  "AIPTW-Cox"    = "#377EB8"
-)
-
-ggplot(plot.df,
-       aes(x = time, y = surv,
-           colour   = method_grp,
-           linetype = method)) +
+ggplot(plot.df, aes(x = time, y = surv, colour = method)) +
   geom_step(linewidth = 0.7) +
   facet_wrap(~A) +
-  scale_colour_manual(values = method.colors, name = "Estimator") +
-  scale_linetype_discrete(name = "Model spec.") +
   ylim(0, 1) + xlim(0, admin.cens) +
   theme_classic(base_size = 12) +
-  theme(legend.position = "bottom",
-        legend.box      = "vertical",
-        legend.text     = element_text(size = 8)) +
-  xlab("Time (years)") +
-  ylab("Marginal Survival Probability") +
-  ggtitle(
-    sprintf("AIPTW: Marginal Survival Curves  [exp=%d, out=%d]",
-            exp.idx, out.idx),
-    subtitle = paste0(
-      "Exposure model: ", exposure.covs[exp.idx], "\n",
-      "Outcome model:  ", outcome.covs[out.idx]
-    )
-  )
+  theme(legend.position = "bottom") +
+  xlab("Time (years)") + ylab("Marginal Survival Probability") +
+  ggtitle(sprintf("AIPTW-Cox  (PS = %s | Outcome = %s)",
+                  ps.idx, out.idx))
