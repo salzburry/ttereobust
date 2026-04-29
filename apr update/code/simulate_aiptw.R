@@ -114,10 +114,21 @@ set_parallel_plan <- function(n_workers) {
 
 ## Apply a function across replications either via furrr or a sequential
 ## lapply, returning a list. f(r) -> data.frame.
-run_replications <- function(R, f, n_workers = 1L, base_seed = 0L) {
+##
+## The packages list is passed to furrr_options() so each multisession
+## worker attaches them at startup. Without this, the rep_fn closure
+## references unqualified symbols (mvrnorm, %>%, mutate, left_join,
+## survSplit, ...) that are pulled in via source() in the parent session
+## but not automatically reproduced on the worker, which would error or
+## silently fall back to the wrong namespace.
+run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
+                              packages = c("survival", "dplyr", "MASS")) {
   if (n_workers > 1L && requireNamespace("furrr", quietly = TRUE)) {
     furrr::future_map(seq_len(R), f,
-                      .options = furrr::furrr_options(seed = TRUE))
+                      .options = furrr::furrr_options(
+                        seed     = TRUE,
+                        packages = packages
+                      ))
   } else {
     lapply(seq_len(R), f)
   }
