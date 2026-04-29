@@ -1,29 +1,34 @@
 # get working dir
 wd <- getwd()
- 
+
 # load libraries
 library(survival)
 library(dplyr)
 library(ggplot2)
-library(flexsurv)
+library(flexsurv)      # provides flexsurvspline() and standsurv()
 library(adjustedCurves)
 library(MASS)
 library(purrr)
 library(gfoRmula)
- 
+library(broom)         # tidy()
+
 source("utils/sim_data.R")
  
-# Specify covs and model formulae
-exposure.covs <- c("L1sq + L2sq + L3 + L4 + L5 + L6 + W", # correct
-                   "L1sq + L2sq + L3 + L4 + L5 + L6", # no W
-                   "L1 + L2 + L3 + L4 + L5 + L6 + W", # wrong functional form
-                   "L3 + L4 + L5") # heavy mis-specification
+# Specify covs and model formulae.
+# Aligned with the Apr 28 DGM in utils/sim_data.R:
+#   - Exposure logit: linear in L1..L6 + W
+#   - Outcome hazard: linear in L1..L6 AND quadratic in L1, L2, with O and W
+# Same scenario set as utils/scenarios.R for the AIPTW harness.
+exposure.covs <- c("L1 + L2 + L3 + L4 + L5 + L6 + W",        # correct
+                   "L1 + L2 + L3 + L4 + L5 + L6",            # no W
+                   "L1sq + L2sq + L3 + L4 + L5 + L6 + W",    # wrong functional form
+                   "L3 + L4 + L5")                            # heavy mis-specification
 exposure.covs.sceN <- length(exposure.covs)
- 
-outcome.covs <- c("A + L1sq + L2sq + L3 + L4 + L5 + L6 + O + W",
-                  "A + L1sq + L2sq + L3 + L4 + L5 + L6",
-                  "A + L1 + L2 + L3 + L4 + L5 + L6 + O + W",
-                  "A + L3 + L4 + L5")
+
+outcome.covs <- c("A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + O + W", # correct
+                  "A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + W",     # no O
+                  "A + L1 + L2 + L3 + L4 + L5 + L6 + O + W",               # wrong functional form
+                  "A + L3 + L4 + L5")                                       # heavy
 outcome.covs.sceN <- length(outcome.covs)
  
 # Simulate data - set params for analysis data
@@ -166,13 +171,21 @@ iptw.cox <- coxph(Surv(eventtime, event) ~ A,
                   ties = "breslow",
                   id = id)
  
-surv_iptwcox <- predict(iptw.cox, type = "survival", newdata = surv.df)
- 
+# Build a treatment-specific marginal survival curve on the protocol time
+# grid via survfit() rather than subject-level predict() at observed
+# event times. The previous predict(..., type='survival', newdata=surv.df)
+# returns one conditional survival per subject at that subject's observed
+# event time, which is not a marginal S(t|A) curve and is not comparable
+# with AIPTW or the protocol targets at t = 1, 5, 10.
+cox.t.grid    <- seq(0, admin.cens, 0.1)
+iptw.cox.fit  <- survfit(iptw.cox, newdata = data.frame(A = c(0, 1)))
+iptw.cox.summ <- summary(iptw.cox.fit, times = cox.t.grid, extend = TRUE)
+
 cox.surv.df <- data.frame(
-  time = surv.df$eventtime,
-  A = surv.df$A,
-  surv = surv_iptwcox,
-  method = paste0("IPTW Cox (", exposure.covs[cov.index],")")
+  time   = rep(cox.t.grid, 2),
+  A      = rep(c(0, 1), each = length(cox.t.grid)),
+  surv   = c(iptw.cox.summ$surv[, 1], iptw.cox.summ$surv[, 2]),
+  method = paste0("IPTW Cox (", exposure.covs[ps.index], ")")
 )
  
 # Fit NPH FPM:
@@ -187,17 +200,22 @@ fpm.surv.df <- summary(fpm.nph.fit, type="survival",
                     newdata=data.frame(A = c(0,1)),
                     tidy = TRUE) %>%
   rename(surv = est) %>%
-  mutate(method = paste0("IPTW FPM NPH (", exposure.covs[cov.index],")")) %>%
+  mutate(method = paste0("IPTW FPM NPH (", exposure.covs[ps.index],")")) %>%
   dplyr::select(time, surv, A, method)
  
-# Fit discrete-time pooled logistic model
- 
-#cutpoints <- unique(survwt.df$eventtime[survwt.df$event == 1])
-rescale_time <- 1/4
-cutpoints <- seq(0,admin.cens, rescale_time) # weekly cutpoints
+# Fit discrete-time pooled logistic model.
+# Discrete-time interval setup mirrors utils/aiptw_estimator.R:
+# interval_ends are the right endpoints (0.25, ..., admin.cens) and
+# split_cuts are the interior cut times passed to survSplit. Excluding
+# 0 and admin.cens prevents the first interval being mis-labelled at
+# t = 0 and the last interval being empty.
+rescale_time  <- 1/4
+interval_ends <- seq(rescale_time, admin.cens, by = rescale_time)
+split_cuts    <- interval_ends[-length(interval_ends)]
+cutpoints     <- interval_ends   # legacy alias used by interval_mapping below
 survwt.long.df <- survSplit(Surv(eventtime, event) ~ .,
                                        data = survwt.df,
-                                       cut = cutpoints,
+                                       cut = split_cuts,
                                        episode = "time_period")
  
 # Fit the pooled logistic regression
@@ -230,7 +248,7 @@ interval_mapping <- data.frame(
 plr.surv.df <- left_join(plr.surv.df %>%
                            add_row(data.frame(time_period = c(1,1), surv = c(1,1), A = c(0,1))),
                          interval_mapping %>% dplyr::select(time_period, time), by = c("time_period")) %>%
-  mutate(method = paste0("IPTW Discrete (", exposure.covs[cov.index],")")) %>%
+  mutate(method = paste0("IPTW Discrete (", exposure.covs[ps.index],")")) %>%
   dplyr::select(time, A, surv, method)
  
 ## Fit a super learner ??
@@ -268,7 +286,7 @@ cox_adjsurv <- adjustedsurv(data=surv.df,
                         conf_int=FALSE)
  
 cox.adjsurv.df <- cox_adjsurv$adj %>% rename(A = group) %>%
-  mutate(method = paste0("Cox Reg Stand (", outcome.covs[cov.index],")"))
+  mutate(method = paste0("Cox Reg Stand (", outcome.covs[out.index],")"))
  
 # Fit NPH FPM:
 cond.fpm.nph.fit <- flexsurvspline(as.formula(fpm.model.formula),
@@ -282,7 +300,7 @@ fpm.adjsurv.df <- standsurv(cond.fpm.nph.fit, type="survival",
                                list(A=1))) %>%
   tidyr::pivot_longer(., cols=c("at1","at2"), names_to="A", values_to = "surv") %>%
   mutate(A = ifelse(A == "at1", 0, 1)) %>%
-  mutate(method = paste0("FPM NPH Reg Stand (", outcome.covs[cov.index],")")) %>%
+  mutate(method = paste0("FPM NPH Reg Stand (", outcome.covs[out.index],")")) %>%
   dplyr::select(time, surv, A, method)
  
  
@@ -340,7 +358,7 @@ plr.adjsurv.df<- plr.adjsurv.df_ %>%
     interval_mapping %>% dplyr::select(time_period, time),
     by = "time_period"
   ) %>%
-  mutate(method = paste0("Discrete Reg Stand (", outcome.covs[cov.index],")")) %>%
+  mutate(method = paste0("Discrete Reg Stand (", outcome.covs[out.index],")")) %>%
   dplyr::select(-time_period)
  
  
@@ -354,7 +372,14 @@ ggplot() +
   xlab("Time") + ylab("Marginal Survival Probability") +
   ggtitle("Compare Methods")
  
-## ------ Doubly Robust Standardisation:
+## ------ Weighted Standardisation (non-DR):
+##
+## NOTE: Weighted Cox / FPM / cloglog-PLR standardisation is NOT doubly
+## robust (Gabriel et al. 2024; Apr 28 methods document Section 3.2).
+## The canonical DR estimator uses a logit (canonical) link in the
+## weighted PLR; that variant is implemented as AIPTW in
+## utils/aiptw_estimator.R. The block below is kept as a comparison
+## arm and is labelled accordingly.
  
 # For the cox model, make use of adjustedCurves(). Alternatively can use riskRegression::ate()
 cond.wtcox <- coxph(as.formula(gsub("\\bA\\b", "A_fct", surv.model.formula)), # use the factor var for A
@@ -373,7 +398,7 @@ cox_drsurv <- adjustedsurv(data=surv.df,
                             conf_int=FALSE)
  
 cox.drsurv.df <- cox_drsurv$adj %>% rename(A = group) %>%
-  mutate(method = paste0("Cox Doubly Robust RS (", outcome.covs[cov.index],")"))
+  mutate(method = paste0("Cox Weighted Standardisation (non-DR) (", outcome.covs[out.index],")"))
  
 # Fit FPM NPH
 cond.wtfpm.nph.fit <- flexsurvspline(as.formula(fpm.model.formula),
@@ -386,7 +411,7 @@ fpm.drsurv.df <- standsurv(cond.wtfpm.nph.fit, type="survival",
                                     list(A=1))) %>%
   tidyr::pivot_longer(., cols=c("at1","at2"), names_to="A", values_to = "surv") %>%
   mutate(A = ifelse(A == "at1", 0, 1)) %>%
-  mutate(method = paste0("FPM NPH Doubly Robust RS (", outcome.covs[cov.index],")")) %>%
+  mutate(method = paste0("FPM NPH Weighted Standardisation (non-DR) (", outcome.covs[out.index],")")) %>%
   dplyr::select(time, surv, A, method)
  
 # Fit the pooled logistic regression for reg stand - need to do manual implementation
@@ -414,7 +439,7 @@ plr.drsurv.df <- plr.drsurv.df_ %>%
     interval_mapping %>% dplyr::select(time_period, time),
     by = "time_period"
   ) %>%
-  mutate(method = paste0("Discrete Doubly Robust RS (", outcome.covs[cov.index],")")) %>%
+  mutate(method = paste0("Discrete Weighted Standardisation (non-DR) (", outcome.covs[out.index],")")) %>%
   dplyr::select(-time_period)
  
 ggplot() +
