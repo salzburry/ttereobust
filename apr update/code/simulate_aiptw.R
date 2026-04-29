@@ -230,10 +230,17 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
     rep_df$misspec     <- scenario_row$misspec
     rep_df$rho_L       <- scenario_row$rho_L
 
-    # Atomic checkpoint: write to a tmp file, then rename.
+    # Atomic checkpoint: write to tmp, rename. file.rename can fail on
+    # Windows / networked storage if the target is locked or already
+    # exists, so the return value must be checked.
     tmp_path <- paste0(rep_path, ".tmp")
     utils::write.csv(rep_df, tmp_path, row.names = FALSE)
-    file.rename(tmp_path, rep_path)
+    ok <- file.rename(tmp_path, rep_path)
+    if (!isTRUE(ok)) {
+      unlink(tmp_path)
+      stop(sprintf("[checkpoint] file.rename failed: %s -> %s",
+                   tmp_path, rep_path))
+    }
     rep_df
   }
 
@@ -278,9 +285,20 @@ main <- function() {
 
     raw_path   <- file.path(RAW_DIR,   paste0(sc$scenario_id, ".csv"))
     truth_path <- file.path(TRUTH_DIR, paste0(sc$scenario_id, ".csv"))
+    rep_dir    <- file.path(RAW_DIR,   sc$scenario_id)
+
     if (file.exists(raw_path) && !opts$overwrite) {
       message(sprintf("[skip] %s exists (use --overwrite to redo)", raw_path))
       next
+    }
+
+    # On --overwrite, also clear any per-replicate checkpoint files from
+    # an earlier interrupted run; otherwise the rep_fn would resume from
+    # stale checkpoints and silently mix old rows with new ones.
+    if (opts$overwrite) {
+      if (file.exists(raw_path))   unlink(raw_path)
+      if (file.exists(truth_path)) unlink(truth_path)
+      if (dir.exists(rep_dir))     unlink(rep_dir, recursive = TRUE)
     }
 
     if (!exists(sc$dgm, envir = dgm_cache, inherits = FALSE)) {
@@ -295,10 +313,16 @@ main <- function() {
     res <- run_one_scenario(sc, dgm_params, opts)
 
     # Atomic consolidate: write tmp -> rename, then drop the rep_dir so
-    # the summariser sees only completed scenarios.
+    # the summariser sees only completed scenarios. Both rename calls
+    # are checked because file.rename can fail on Windows / networked FS.
     tmp_raw <- paste0(raw_path, ".tmp")
-    utils::write.csv(res$reps,  tmp_raw,    row.names = FALSE)
-    file.rename(tmp_raw, raw_path)
+    utils::write.csv(res$reps, tmp_raw, row.names = FALSE)
+    ok <- file.rename(tmp_raw, raw_path)
+    if (!isTRUE(ok)) {
+      unlink(tmp_raw)
+      stop(sprintf("[consolidate] file.rename failed: %s -> %s",
+                   tmp_raw, raw_path))
+    }
 
     utils::write.csv(res$truth, truth_path, row.names = FALSE)
     if (dir.exists(res$rep_dir)) {

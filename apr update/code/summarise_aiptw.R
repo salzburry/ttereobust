@@ -58,9 +58,12 @@ main <- function() {
   reps  <- load_csv_dir(RAW_DIR)
   truth <- load_csv_dir(TRUTH_DIR)
 
-  # Some older outputs may not have status / n_boot_ok columns; default them.
-  if (is.null(reps$status))    reps$status    <- "ok"
-  if (is.null(reps$n_boot_ok)) reps$n_boot_ok <- NA_integer_
+  # Some older outputs may not have the audit columns; default them so
+  # the aggregator still produces a usable summary.
+  if (is.null(reps$status))        reps$status        <- "ok"
+  if (is.null(reps$n_boot_ok))     reps$n_boot_ok     <- NA_integer_
+  if (is.null(reps$n_boot_total))  reps$n_boot_total  <- NA_integer_
+  if (is.null(reps$n_boot_failed)) reps$n_boot_failed <- NA_integer_
 
   truth_long <- bind_rows(
     truth %>% transmute(scenario_id, dgm, misspec, rho_L,
@@ -80,29 +83,37 @@ main <- function() {
   summary <- joined %>%
     dplyr::group_by(scenario_id, dgm, misspec, rho_L, t, target) %>%
     dplyr::summarise(
-      n_reps_total   = dplyr::n(),
-      n_reps_ok      = sum(status == "ok", na.rm = TRUE),
-      n_reps_failed  = n_reps_total - n_reps_ok,
-      mean_n_boot_ok = mean(n_boot_ok, na.rm = TRUE),
-      truth          = mean(truth, na.rm = TRUE),
-      mean_est       = mean(est,   na.rm = TRUE),
-      bias           = mean_est - truth,
-      rel_bias_pct   = 100 * bias / abs(truth),
-      empirical_sd   = stats::sd(est, na.rm = TRUE),
-      mean_model_se  = mean(se, na.rm = TRUE),
-      rel_se_err     = mean_model_se / empirical_sd - 1,
-      coverage       = mean(ci_lo <= truth & truth <= ci_hi, na.rm = TRUE),
+      # Replicate-level accounting (denominator audit).
+      n_reps_total      = dplyr::n(),
+      n_reps_ok         = sum(status == "ok", na.rm = TRUE),
+      n_reps_failed     = n_reps_total - n_reps_ok,
+      # Bootstrap-level accounting (denominator for SE/CI).
+      mean_n_boot_total = mean(n_boot_total, na.rm = TRUE),
+      mean_n_boot_ok    = mean(n_boot_ok,    na.rm = TRUE),
+      mean_n_boot_failed = mean(n_boot_failed, na.rm = TRUE),
+      # CI denominator: replicates whose bootstrap actually produced a
+      # finite CI. coverage and power below average over these rows; the
+      # denominator is stored explicitly so it is auditable.
+      n_ci_ok           = sum(!is.na(ci_lo) & !is.na(ci_hi)),
+      truth             = mean(truth, na.rm = TRUE),
+      mean_est          = mean(est,   na.rm = TRUE),
+      bias              = mean_est - truth,
+      rel_bias_pct      = 100 * bias / abs(truth),
+      empirical_sd      = stats::sd(est, na.rm = TRUE),
+      mean_model_se     = mean(se, na.rm = TRUE),
+      rel_se_err        = mean_model_se / empirical_sd - 1,
+      coverage          = mean(ci_lo <= truth & truth <= ci_hi,
+                                na.rm = TRUE),
       # Power: P(CI excludes 0). Meaningful only for the RD target where
       # H0: RD = 0 makes sense. S0 and S1 are survival probabilities far
-      # from 0 by construction, so 'power' for those targets is reported
-      # as NA to avoid misinterpretation.
-      power          = ifelse(
+      # from 0 by construction, so 'power' for those targets is NA.
+      power             = ifelse(
         dplyr::first(target) == "RD",
         mean(!(ci_lo <= 0 & 0 <= ci_hi), na.rm = TRUE),
         NA_real_
       ),
-      mean_ci_width  = mean(ci_hi - ci_lo, na.rm = TRUE),
-      .groups        = "drop"
+      mean_ci_width     = mean(ci_hi - ci_lo, na.rm = TRUE),
+      .groups           = "drop"
     ) %>%
     dplyr::arrange(dgm, misspec, rho_L, target, t)
 

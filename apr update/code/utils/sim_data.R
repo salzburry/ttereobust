@@ -4,7 +4,7 @@ sim_surv_data <- function(seed = 2026,
                           Lcovs.sq = 2,
                           mu = rep(0,8), # Lcovs.linear + Lcovs.sq + 2 (W and O)
                           sigma = diag(8),
-                          alpha.L = c(0.005, 0.001, -0.3, 0.1, 0.2, 0.15), # params for exposure model c(L_1, ..., L_{Lcovs.linear + Lcovs.sq})
+                          alpha.L = c(0.5, 0.4, -0.6, 0.4, 0.5, 0.3), # Apr 28 doc Section 6.2 default; per-DGM files override
                           alpha.W = 1,
                           # coefficient / log-HRs for outcome model
                           coeff.A = log(0.9),
