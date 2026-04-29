@@ -59,17 +59,18 @@ source(file.path(CODE_DIR, "utils", "scenarios.R"))
 
 parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
   defaults <- list(
-    R         = 200L,            # replications per scenario
-    B         = 100L,            # bootstrap resamples per replicate
-    base_seed = 1000L,           # base seed; replicate r uses base_seed + r
-    N         = 2500L,           # protocol Section 6.2
-    t_eval    = c(1, 5, 10),     # protocol Section 6.3
-    dgm       = NULL,            # NULL = all
-    misspec   = NULL,            # NULL = all 5 main patterns
-    rho       = NULL,            # NULL = all (0, 0.25, 0.75)
+    R            = 200L,           # replications per scenario
+    B            = 100L,           # bootstrap resamples per replicate
+    base_seed    = 1000L,          # base seed; replicate r uses base_seed + r
+    N            = 2500L,          # protocol Section 6.2
+    t_eval       = c(1, 5, 10),    # protocol Section 6.3
+    rescale_time = 0.25,           # discrete-time interval width; smaller = more time-period dummies in PLR (slower fit, finer grid)
+    dgm          = NULL,           # NULL = all
+    misspec      = NULL,           # NULL = all 5 main patterns
+    rho          = NULL,           # NULL = all (0, 0.25, 0.75)
     include_heavy = FALSE,
-    n_workers = 1L,              # 1 = sequential
-    overwrite = FALSE
+    n_workers    = 1L,             # 1 = sequential
+    overwrite    = FALSE
   )
 
   i <- 1L
@@ -81,6 +82,7 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
       "--B"             = { defaults$B         <- as.integer(val); i <- i + 2L },
       "--base-seed"     = { defaults$base_seed <- as.integer(val); i <- i + 2L },
       "--N"             = { defaults$N         <- as.integer(val); i <- i + 2L },
+      "--rescale-time"  = { defaults$rescale_time <- as.numeric(val); i <- i + 2L },
       "--dgm"           = { defaults$dgm       <- strsplit(val, ",")[[1]];     i <- i + 2L },
       "--misspec"       = { defaults$misspec   <- strsplit(val, ",")[[1]];     i <- i + 2L },
       "--rho"           = { defaults$rho       <- as.numeric(strsplit(val, ",")[[1]]); i <- i + 2L },
@@ -99,17 +101,36 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
 set_parallel_plan <- function(n_workers) {
   if (n_workers <= 1L) {
     message("[parallel] sequential")
-    return(invisible(NULL))
+    return(invisible(1L))
   }
   has_pkgs <- requireNamespace("future", quietly = TRUE) &&
               requireNamespace("furrr",  quietly = TRUE)
   if (!has_pkgs) {
     warning("future / furrr not installed; falling back to sequential",
             call. = FALSE)
-    return(invisible(NULL))
+    return(invisible(1L))
+  }
+  # Respect container / cgroup CPU limits: parallelly::availableCores()
+  # honours cgroups2.cpu.max so we do not over-subscribe a 1-CPU pod and
+  # then fail in checkNumberOfLocalWorkers(). Cap the requested worker
+  # count at the available cores with a clear warning.
+  avail <- if (requireNamespace("parallelly", quietly = TRUE))
+             as.integer(parallelly::availableCores()) else
+             parallel::detectCores(logical = TRUE)
+  if (is.na(avail) || avail < 1L) avail <- 1L
+  if (n_workers > avail) {
+    warning(sprintf(
+      "--workers %d requested but only %d core(s) available; capping to %d",
+      n_workers, avail, avail), call. = FALSE)
+    n_workers <- avail
+  }
+  if (n_workers <= 1L) {
+    message("[parallel] sequential (only ", avail, " core available)")
+    return(invisible(1L))
   }
   future::plan(future::multisession, workers = n_workers)
   message("[parallel] future::multisession with ", n_workers, " workers")
+  invisible(n_workers)
 }
 
 ## Apply a function across replications either via furrr or a sequential
@@ -121,6 +142,10 @@ set_parallel_plan <- function(n_workers) {
 ## survSplit, ...) that are pulled in via source() in the parent session
 ## but not automatically reproduced on the worker, which would error or
 ## silently fall back to the wrong namespace.
+##
+## Sequential mode prints periodic progress messages so a long run on a
+## 1-CPU pod does not appear frozen between scenario start and scenario
+## complete.
 run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
                               packages = c("survival", "dplyr", "MASS")) {
   if (n_workers > 1L && requireNamespace("furrr", quietly = TRUE)) {
@@ -130,7 +155,20 @@ run_replications <- function(R, f, n_workers = 1L, base_seed = 0L,
                         packages = packages
                       ))
   } else {
-    lapply(seq_len(R), f)
+    t0       <- Sys.time()
+    interval <- max(1L, R %/% 20L)         # ~20 progress messages per scenario
+    out      <- vector("list", R)
+    for (r in seq_len(R)) {
+      out[[r]] <- f(r)
+      if (r == 1L || r %% interval == 0L || r == R) {
+        elapsed <- as.numeric(Sys.time() - t0, units = "secs")
+        eta     <- elapsed * (R - r) / r
+        message(sprintf(
+          "    [rep %d/%d]  elapsed=%.1fs  eta=%.1fs", r, R, elapsed, eta
+        ))
+      }
+    }
+    out
   }
 }
 
@@ -210,15 +248,17 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
 
     est <- aiptw_estimate(
       surv.df, scenario_row$ps_spec, scenario_row$out_spec,
-      t_eval     = opts$t_eval,
-      admin.cens = dgm_params$admin.cens
+      t_eval       = opts$t_eval,
+      admin.cens   = dgm_params$admin.cens,
+      rescale_time = opts$rescale_time
     )
 
     boot <- aiptw_bootstrap(
       surv.df, scenario_row$ps_spec, scenario_row$out_spec,
-      t_eval     = opts$t_eval,
-      admin.cens = dgm_params$admin.cens,
-      B          = opts$B
+      t_eval       = opts$t_eval,
+      admin.cens   = dgm_params$admin.cens,
+      rescale_time = opts$rescale_time,
+      B            = opts$B
     )
 
     # Long-format with status carried through.
@@ -260,12 +300,21 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
 
   rep_df <- do.call(rbind, rep_list)
 
-  # Report failure rate up front so the user notices early.
-  n_fail <- sum(rep_df$status == "error" & rep_df$target == "S0")
+  # Report failure rate up front. Count DISTINCT replicates that errored
+  # (rep_df has 9 rows per replicate: 3 t x 3 target). Print the first
+  # distinct error message inline so the user does not need to open the
+  # raw CSV to diagnose a systematic failure.
+  failed_reps <- unique(rep_df$rep[rep_df$status == "error"])
+  n_fail <- length(failed_reps)
   if (n_fail > 0) {
-    warning(sprintf("[%s] %d / %d replicates failed; see error_msg column",
-                    scenario_row$scenario_id, n_fail, opts$R),
-            call. = FALSE)
+    err_msgs <- unique(stats::na.omit(
+      rep_df$error_msg[rep_df$status == "error"]
+    ))
+    first_err <- if (length(err_msgs) > 0L) err_msgs[1] else "(no message)"
+    warning(sprintf(
+      "[%s] %d / %d replicates failed. First error: %s",
+      scenario_row$scenario_id, n_fail, opts$R, first_err
+    ), call. = FALSE)
   }
 
   list(reps = rep_df, truth = truth, rep_dir = rep_dir)

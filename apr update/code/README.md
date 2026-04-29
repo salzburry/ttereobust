@@ -62,6 +62,7 @@ Rscript summarise_aiptw.R
 | `--R N` | 200 | replications per scenario |
 | `--B N` | 100 | bootstrap resamples per replicate |
 | `--N N` | 2500 | sample size per simulated dataset (Section 6.2) |
+| `--rescale-time x` | 0.25 | discrete-time interval width in years; smaller = finer grid + more time-period dummies in the PLR (slower fit). Use 1.0 for ~4× faster runs on a constrained pod, 0.25 for protocol-faithful results |
 | `--base-seed N` | 1000 | replication r uses `base_seed + r` |
 | `--dgm a,b` | all | subset of `ph,delayed,waning` |
 | `--misspec a,b` | all | subset of misspec patterns |
