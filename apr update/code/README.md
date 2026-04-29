@@ -87,6 +87,7 @@ Rscript summarise_aiptw.R
 | n_boot_total | planned bootstrap reps (`B` from CLI) |
 | n_boot_ok | successful bootstrap reps |
 | n_boot_failed | `n_boot_total − n_boot_ok` |
+| boot_errors | distinct error messages from any failed bootstrap fits, joined with ` | ` (NA when none) |
 | se | bootstrap SE |
 | ci_lo, ci_hi | 95% percentile bootstrap CI |
 
@@ -116,6 +117,7 @@ protocol Section 6.5 metrics plus audit columns:
 | coverage | proportion of `n_ci_ok` CIs containing the truth |
 | power | for `RD` rows only: proportion of CIs excluding 0; NA for `S0`, `S1` |
 | mean_ci_width | average bootstrap CI width |
+| boot_errors_seen | distinct bootstrap error messages observed across replicates, joined with ` || ` (NA when none) |
 
 ## Checkpointing and resume
 
