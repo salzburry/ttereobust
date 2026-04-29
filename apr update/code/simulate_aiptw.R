@@ -99,17 +99,36 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
 set_parallel_plan <- function(n_workers) {
   if (n_workers <= 1L) {
     message("[parallel] sequential")
-    return(invisible(NULL))
+    return(invisible(1L))
   }
   has_pkgs <- requireNamespace("future", quietly = TRUE) &&
               requireNamespace("furrr",  quietly = TRUE)
   if (!has_pkgs) {
     warning("future / furrr not installed; falling back to sequential",
             call. = FALSE)
-    return(invisible(NULL))
+    return(invisible(1L))
+  }
+  # Respect container / cgroup CPU limits: parallelly::availableCores()
+  # honours cgroups2.cpu.max so we do not over-subscribe a 1-CPU pod and
+  # then fail in checkNumberOfLocalWorkers(). Cap the requested worker
+  # count at the available cores with a clear warning.
+  avail <- if (requireNamespace("parallelly", quietly = TRUE))
+             as.integer(parallelly::availableCores()) else
+             parallel::detectCores(logical = TRUE)
+  if (is.na(avail) || avail < 1L) avail <- 1L
+  if (n_workers > avail) {
+    warning(sprintf(
+      "--workers %d requested but only %d core(s) available; capping to %d",
+      n_workers, avail, avail), call. = FALSE)
+    n_workers <- avail
+  }
+  if (n_workers <= 1L) {
+    message("[parallel] sequential (only ", avail, " core available)")
+    return(invisible(1L))
   }
   future::plan(future::multisession, workers = n_workers)
   message("[parallel] future::multisession with ", n_workers, " workers")
+  invisible(n_workers)
 }
 
 ## Apply a function across replications either via furrr or a sequential
@@ -260,12 +279,21 @@ run_one_scenario <- function(scenario_row, dgm_params, opts) {
 
   rep_df <- do.call(rbind, rep_list)
 
-  # Report failure rate up front so the user notices early.
-  n_fail <- sum(rep_df$status == "error" & rep_df$target == "S0")
+  # Report failure rate up front. Count DISTINCT replicates that errored
+  # (rep_df has 9 rows per replicate: 3 t x 3 target). Print the first
+  # distinct error message inline so the user does not need to open the
+  # raw CSV to diagnose a systematic failure.
+  failed_reps <- unique(rep_df$rep[rep_df$status == "error"])
+  n_fail <- length(failed_reps)
   if (n_fail > 0) {
-    warning(sprintf("[%s] %d / %d replicates failed; see error_msg column",
-                    scenario_row$scenario_id, n_fail, opts$R),
-            call. = FALSE)
+    err_msgs <- unique(stats::na.omit(
+      rep_df$error_msg[rep_df$status == "error"]
+    ))
+    first_err <- if (length(err_msgs) > 0L) err_msgs[1] else "(no message)"
+    warning(sprintf(
+      "[%s] %d / %d replicates failed. First error: %s",
+      scenario_row$scenario_id, n_fail, opts$R, first_err
+    ), call. = FALSE)
   }
 
   list(reps = rep_df, truth = truth, rep_dir = rep_dir)
