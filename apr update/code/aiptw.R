@@ -65,9 +65,17 @@ simN <- 2500   # protocol Section 6.2
 # source("get_params_delayed.R")
 source("get_params_ph.R")
 
-rescale_time <- 1/4                           # quarter-year discrete intervals
-cutpoints    <- seq(0, admin.cens, rescale_time)
-t.eval       <- seq(0, admin.cens, 0.1)       # grid for evaluation / plotting
+rescale_time  <- 1/4                                  # quarter-year intervals
+# Discrete-time interval setup (mirror aiptw_discrete.R). interval_ends are
+# the right endpoints (0.25, 0.5, ..., admin.cens). split_cuts excludes the
+# admin.cens endpoint so survSplit does not produce an empty trailing
+# interval, and excludes 0 because survSplit treats time 0 as the implicit
+# start of the first interval -- passing 0 as a cut shifts time_period
+# labels and causes boundary mis-alignment at t = 0.
+interval_ends <- seq(rescale_time, admin.cens, by = rescale_time)
+split_cuts    <- interval_ends[-length(interval_ends)]
+cutpoints     <- interval_ends                        # legacy alias
+t.eval        <- seq(0, admin.cens, 0.1)              # grid for plotting
 
 
 # ---- Model specification scenarios (per protocol Section 6.4) ----------------
@@ -161,18 +169,20 @@ sim.df <- sim_surv_data(
 
 surv.df <- sim.df$data
 
-# Long format (person-period) for discrete-time models
+# Long format (person-period) for discrete-time models. Use split_cuts
+# (interior cuts only) so every interval is non-empty and time_period
+# labels align cleanly with interval_mapping$time below.
 surv.long.df <- survSplit(
   Surv(eventtime, event) ~ .,
   data    = surv.df,
-  cut     = cutpoints,
+  cut     = split_cuts,
   episode = "time_period"
 )
 
-# Time-period to calendar-time mapping
+# Time-period to calendar-time mapping (period k ends at interval_ends[k]).
 interval_mapping <- data.frame(
-  time_period = seq_along(cutpoints),
-  time        = cutpoints
+  time_period = seq_along(interval_ends),
+  time        = interval_ends
 )
 
 # Baseline covariate lookup (used when building prediction grids)

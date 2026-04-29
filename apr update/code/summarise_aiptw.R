@@ -74,6 +74,27 @@ main <- function() {
                         t, target = "RD", truth = RD)
   )
 
+  # Validate raw <-> truth alignment BEFORE the join so a stale or missing
+  # truth file fails loudly instead of silently producing NA bias / NaN
+  # coverage downstream. Guards against the case where results/raw/ and
+  # results/truth/ get out of sync (e.g. partial deletions or an old run
+  # whose truth was never produced).
+  raw_scenarios   <- unique(reps$scenario_id)
+  truth_scenarios <- unique(truth$scenario_id)
+  missing_truth   <- setdiff(raw_scenarios, truth_scenarios)
+  if (length(missing_truth) > 0L) {
+    stop("Raw scenarios with no matching truth CSV (would produce NA ",
+         "performance metrics): ",
+         paste(missing_truth, collapse = ", "),
+         ". Re-run simulate_aiptw.R for these scenarios or remove the ",
+         "stale raw outputs.")
+  }
+  orphan_truth <- setdiff(truth_scenarios, raw_scenarios)
+  if (length(orphan_truth) > 0L) {
+    warning("Truth CSVs with no matching raw scenario (will be ignored): ",
+            paste(orphan_truth, collapse = ", "), call. = FALSE)
+  }
+
   joined <- reps %>%
     dplyr::left_join(
       truth_long %>% dplyr::select(scenario_id, t, target, truth),

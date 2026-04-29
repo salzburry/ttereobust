@@ -189,15 +189,33 @@ aiptw_bootstrap <- function(surv.df, ps_spec, out_spec,
   }
   boot_long_df <- do.call(rbind, boot_long)
 
+  # Guard against empty / single-value bootstrap distributions:
+  #   - sd() on < 2 non-NA values returns NA with a warning.
+  #   - quantile() on 0 non-NA values warns "no non-missing arguments"; in
+  #     some R versions and with type = 7 (default) it can also error.
+  # Compute SE / CIs only when the underlying sample has enough non-NA
+  # values, otherwise emit NA explicitly. n_boot_failed is always
+  # available to audit the cause.
+  safe_sd <- function(v) {
+    if (sum(!is.na(v)) < 2L) NA_real_ else stats::sd(v, na.rm = TRUE)
+  }
+  safe_q  <- function(v, p) {
+    if (sum(!is.na(v)) < 1L) {
+      NA_real_
+    } else {
+      suppressWarnings(stats::quantile(v, p, na.rm = TRUE, names = FALSE))
+    }
+  }
+
   boot_long_df %>%
     dplyr::group_by(t, target) %>%
     dplyr::summarise(
       n_boot_total  = B,                            # planned bootstrap reps
       n_boot_ok     = sum(!is.na(val)),
       n_boot_failed = B - n_boot_ok,
-      se        = stats::sd(val, na.rm = TRUE),
-      ci_lo     = stats::quantile(val, alpha,     na.rm = TRUE, names = FALSE),
-      ci_hi     = stats::quantile(val, 1 - alpha, na.rm = TRUE, names = FALSE),
+      se        = safe_sd(val),
+      ci_lo     = safe_q(val, alpha),
+      ci_hi     = safe_q(val, 1 - alpha),
       .groups   = "drop"
     )
 }
