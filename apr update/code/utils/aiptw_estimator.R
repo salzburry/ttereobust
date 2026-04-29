@@ -88,24 +88,40 @@ aiptw_estimate <- function(surv.df,
       family = stats::binomial(link = "logit")
     )
 
-    # Counterfactual prediction grid
-    time_periods <- sort(unique(surv.long.df$time_period))
-    pred.df <- expand.grid(
-      id          = baseline.covs$id,
-      time_period = time_periods,
-      A           = c(0L, 1L),
-      KEEP.OUT.ATTRS = FALSE
-    )
-    pred.df <- dplyr::left_join(pred.df, baseline.covs, by = "id")
-    pred.df$event <- 0L
-    pred.df$haz   <- stats::predict(plr.mod, newdata = pred.df,
-                                    type = "response")
+    # Counterfactual prediction grid. Hot path -- built with rep() and
+    # base R matrix ops rather than expand.grid / dplyr left_join /
+    # group_by / cumprod, because this code runs once per replicate and
+    # once per bootstrap. For a 2500-patient dataset with 40 time
+    # periods this previously dominated the per-fit cost (200k-row
+    # data frames, sorted joins, 5,000-group cumprod). The matrix
+    # version is roughly an order of magnitude faster.
+    n_periods <- length(interval_ends)
+    N         <- nrow(surv.df)
 
-    pred.df <- pred.df %>%
-      dplyr::arrange(id, A, time_period) %>%
-      dplyr::group_by(id, A) %>%
-      dplyr::mutate(csurv = cumprod(1 - haz)) %>%
-      dplyr::ungroup()
+    bc_rep <- baseline.covs[rep(seq_len(N), n_periods), , drop = FALSE]
+    bc_rep$time_period <- rep(seq_len(n_periods), each = N)
+    bc_rep$event       <- 0L
+
+    bc_rep$A   <- 0L
+    haz0_vec   <- stats::predict(plr.mod, newdata = bc_rep, type = "response")
+    bc_rep$A   <- 1L
+    haz1_vec   <- stats::predict(plr.mod, newdata = bc_rep, type = "response")
+
+    # Reshape to N x n_periods. Column k = hazard at time-period k.
+    H0 <- matrix(haz0_vec, nrow = N, ncol = n_periods)
+    H1 <- matrix(haz1_vec, nrow = N, ncol = n_periods)
+
+    # Row-wise cumulative survival: S(k) = prod_{j<=k} (1 - H[, j]).
+    S0_mat <- matrix(NA_real_, nrow = N, ncol = n_periods)
+    S1_mat <- matrix(NA_real_, nrow = N, ncol = n_periods)
+    S0_mat[, 1] <- 1 - H0[, 1]
+    S1_mat[, 1] <- 1 - H1[, 1]
+    if (n_periods > 1L) {
+      for (k in 2:n_periods) {
+        S0_mat[, k] <- S0_mat[, k - 1] * (1 - H0[, k])
+        S1_mat[, k] <- S1_mat[, k - 1] * (1 - H1[, k])
+      }
+    }
 
     obs_time <- surv.df$eventtime
 
@@ -117,18 +133,8 @@ aiptw_estimate <- function(surv.df,
         max(which(interval_mapping$time <= t))
       ]
 
-      Q_at_t <- pred.df %>%
-        dplyr::filter(time_period == tp) %>%
-        dplyr::select(id, A, csurv)
-
-      Q0 <- dplyr::left_join(
-        dplyr::select(surv.df, id),
-        dplyr::filter(Q_at_t, A == 0L), by = "id"
-      )$csurv
-      Q1 <- dplyr::left_join(
-        dplyr::select(surv.df, id),
-        dplyr::filter(Q_at_t, A == 1L), by = "id"
-      )$csurv
+      Q0 <- S0_mat[, tp]
+      Q1 <- S1_mat[, tp]
 
       Y_ipcw <- as.numeric(obs_time >= t) / G_tminus[k]
 
