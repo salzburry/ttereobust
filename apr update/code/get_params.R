@@ -14,8 +14,8 @@ alpha.W = 1 # coefficient / log-HRs for outcome model
 coeff.A = log(0.75)
 coeff.L = log(c(0.95, 1.1, 0.95, 0.9, 1.05, 1.01))
 coeff.Lsq = log(c(0.945, 1.05))
-coeff.O = log(0.9) # this will only appear in outcome model
-coeff.W = log(0.9) # this will only appear in exposure model
+coeff.O = log(0.9) # outcome-only confounder
+coeff.W = log(0.9) # confounder of BOTH exposure and outcome (matches sim_data.R DGM)
  
 # params for generating event and censoring times
 gamma.tte = 1
