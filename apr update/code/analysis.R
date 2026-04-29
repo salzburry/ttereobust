@@ -13,23 +13,16 @@ library(gfoRmula)
 library(broom)         # tidy()
 
 source("utils/sim_data.R")
- 
-# Specify covs and model formulae.
-# Aligned with the Apr 28 DGM in utils/sim_data.R:
-#   - Exposure logit: linear in L1..L6 + W
-#   - Outcome hazard: linear in L1..L6 AND quadratic in L1, L2, with O and W
-# Same scenario set as utils/scenarios.R for the AIPTW harness.
-exposure.covs <- c("L1 + L2 + L3 + L4 + L5 + L6 + W",        # correct
-                   "L1 + L2 + L3 + L4 + L5 + L6",            # no W
-                   "L1sq + L2sq + L3 + L4 + L5 + L6 + W",    # wrong functional form
-                   "L3 + L4 + L5")                            # heavy mis-specification
-exposure.covs.sceN <- length(exposure.covs)
+source("utils/scenarios.R")   # ps.specs / out.specs (single source of truth)
 
-outcome.covs <- c("A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + O + W", # correct
-                  "A + L1 + L1sq + L2 + L2sq + L3 + L4 + L5 + L6 + W",     # no O
-                  "A + L1 + L2 + L3 + L4 + L5 + L6 + O + W",               # wrong functional form
-                  "A + L3 + L4 + L5")                                       # heavy
-outcome.covs.sceN <- length(outcome.covs)
+# Local positional aliases for backwards compatibility with this script's
+# index-based access pattern (exposure.covs[ps.index] etc.). Names are
+# kept so downstream paste0() output uses the same scenario labels as
+# the AIPTW harness.
+exposure.covs        <- ps.specs
+exposure.covs.sceN   <- length(exposure.covs)
+outcome.covs         <- out.specs
+outcome.covs.sceN    <- length(outcome.covs)
  
 # Simulate data - set params for analysis data
 simN = 2500   # N per protocol Section 6.2

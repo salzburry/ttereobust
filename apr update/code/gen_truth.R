@@ -14,79 +14,63 @@ library(gridExtra)
 library(grid)
  
 source("utils/sim_data.R")
- 
+source("utils/compute_truth.R")
+
 # Simulate data - set params
 simN = 500000
- 
+
 #source("get_params_waning.R")
 #source("get_params_delayed.R")
 source("get_params_ph.R")
- 
-sim.df0 <- sim_surv_data(seed = this.seed,
-                        N = simN,
-                        Lcovs.linear = N.Lcovs.linear,
-                        Lcovs.sq = N.Lcovs.sq,
-                        mu = mu, # Lcovs.linear + Lcovs.sq + 2 (W and O)
-                        sigma = sigma,
-                        alpha.L = alpha.L, # params for exposure model c(L_1, ..., L_{Lcovs.linear + Lcovs.sq})
-                        alpha.W = alpha.W,
-                        # coefficient / log-HRs for outcome model
-                        coeff.A = coeff.A,
-                        coeff.L = coeff.L,
-                        coeff.Lsq = coeff.Lsq,
-                        coeff.O = coeff.O, # this will only appear in outcome model
-                        coeff.W = coeff.W, # this will only appear in exposure model
-                        gamma.tte = gamma.tte,
-                        lambda.tte = lambda.tte,
-                        lambda.cens = lambda.cens,
-                        admin.cens = admin.cens,
-                        gen.truth = 0 # set to 1 to gen truth for trt arm
+
+# DGM parameter bag passed to compute_truth() and reused for the analytic
+# hazard / HR computation below.
+dgm_params <- list(
+  N.Lcovs.linear = N.Lcovs.linear, N.Lcovs.sq = N.Lcovs.sq,
+  mu = mu, sigma = sigma,
+  alpha.L = alpha.L, alpha.W = alpha.W,
+  coeff.A = coeff.A, coeff.L = coeff.L, coeff.Lsq = coeff.Lsq,
+  coeff.O = coeff.O, coeff.W = coeff.W,
+  gamma.tte = gamma.tte, lambda.tte = lambda.tte,
+  lambda.cens = lambda.cens, admin.cens = admin.cens
 )
-sim.df1 <- sim_surv_data(seed = this.seed,
-                         N = simN,
-                         Lcovs.linear = N.Lcovs.linear,
-                         Lcovs.sq = N.Lcovs.sq,
-                         mu = mu, # Lcovs.linear + Lcovs.sq + 2 (W and O)
-                         sigma = sigma,
-                         alpha.L = alpha.L, # params for exposure model c(L_1, ..., L_{Lcovs.linear + Lcovs.sq})
-                         alpha.W = alpha.W,
-                         # coefficient / log-HRs for outcome model
-                         coeff.A = coeff.A,
-                         coeff.L = coeff.L,
-                         coeff.Lsq = coeff.Lsq,
-                         coeff.O = coeff.O, # this will only appear in outcome model
-                         coeff.W = coeff.W, # this will only appear in exposure model
-                         gamma.tte = gamma.tte,
-                         lambda.tte = lambda.tte,
-                         lambda.cens = lambda.cens,
-                         admin.cens = admin.cens,
-                         gen.truth = 1 # set to 0 to gen truth for control
+
+# Two A-forced samples used only for the KM Monte-Carlo truth check below.
+# The analytic Weibull truth comes from compute_truth().
+sim.df0 <- sim_surv_data(seed = this.seed, N = simN,
+  Lcovs.linear = N.Lcovs.linear, Lcovs.sq = N.Lcovs.sq,
+  mu = mu, sigma = sigma, alpha.L = alpha.L, alpha.W = alpha.W,
+  coeff.A = coeff.A, coeff.L = coeff.L, coeff.Lsq = coeff.Lsq,
+  coeff.O = coeff.O, coeff.W = coeff.W,
+  gamma.tte = gamma.tte, lambda.tte = lambda.tte,
+  lambda.cens = lambda.cens, admin.cens = admin.cens,
+  gen.truth = 0
 )
- 
-surv.df <- rbind(sim.df0$data, sim.df1$data)
-cov.mat <- sim.df1$cov.mat # just need to extract the covartiate matrix from either simulation
-cov.mat.L <- cov.mat[,1:(N.Lcovs.linear+N.Lcovs.sq)]
- 
-t.list <- seq(0,admin.cens, 0.1)
-surv1_wei <- sapply(t.list, function(t) {
-  mean(exp(-lambda.tte*(t^gamma.tte)*exp(
-    coeff.A +
-      cov.mat.L %*% coeff.L +
-      cov.mat.L[,1:2]^2 %*% coeff.Lsq[1:2] +
-      coeff.O*cov.mat[,"O"] + coeff.W*cov.mat[,"W"]
-  )))
-})
-surv0_wei <- sapply(t.list, function(t) {
-  mean(exp(-lambda.tte*(t^gamma.tte)*exp(
-      cov.mat.L %*% coeff.L +
-      cov.mat.L[,1:2]^2 %*% coeff.Lsq[1:2] +
-      coeff.O*cov.mat[,"O"] + coeff.W*cov.mat[,"W"]
-  )))
-})
- 
+sim.df1 <- sim_surv_data(seed = this.seed, N = simN,
+  Lcovs.linear = N.Lcovs.linear, Lcovs.sq = N.Lcovs.sq,
+  mu = mu, sigma = sigma, alpha.L = alpha.L, alpha.W = alpha.W,
+  coeff.A = coeff.A, coeff.L = coeff.L, coeff.Lsq = coeff.Lsq,
+  coeff.O = coeff.O, coeff.W = coeff.W,
+  gamma.tte = gamma.tte, lambda.tte = lambda.tte,
+  lambda.cens = lambda.cens, admin.cens = admin.cens,
+  gen.truth = 1
+)
+
+surv.df   <- rbind(sim.df0$data, sim.df1$data)
+cov.mat   <- sim.df1$cov.mat
+cov.mat.L <- cov.mat[, 1:(N.Lcovs.linear + N.Lcovs.sq)]
+
+# Analytic Weibull truth. Replaces the two sapply blocks that recomputed
+# what compute_truth() does. The hazard / HR diagnostics below still need
+# cov.mat for the per-row hazard computation, so it stays available.
+t.list   <- seq(0, admin.cens, 0.1)
+truth_df <- compute_truth(t_eval = t.list, dgm = dgm_params)
+surv0_wei <- truth_df$S0
+surv1_wei <- truth_df$S1
+
 weib.surv.df <- data.frame(
   time = c(t.list, t.list),
-  A = c(rep(0,length(t.list)), rep(1,length(t.list))),
+  A    = c(rep(0, length(t.list)), rep(1, length(t.list))),
   surv = c(surv0_wei, surv1_wei)
 )
  
