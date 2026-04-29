@@ -81,7 +81,9 @@ Rscript summarise_aiptw.R
 | est | point estimate (raw, unclipped) |
 | status | `"ok"` or `"error"` |
 | error_msg | error message when `status == "error"`, NA otherwise |
-| n_boot_ok | number of successful bootstrap resamples (out of B) |
+| n_boot_total | planned bootstrap reps (`B` from CLI) |
+| n_boot_ok | successful bootstrap reps |
+| n_boot_failed | `n_boot_total − n_boot_ok` |
 | se | bootstrap SE |
 | ci_lo, ci_hi | 95% percentile bootstrap CI |
 
@@ -89,10 +91,26 @@ Rscript summarise_aiptw.R
 analytic Weibull truth.
 
 `results/summary.csv` — one row per (scenario, t, target) holding the
-protocol Section 6.5 metrics: `n_reps_total`, `n_reps_ok`, `n_reps_failed`,
-`mean_n_boot_ok`, `truth`, `mean_est`, `bias`, `rel_bias_pct`,
-`empirical_sd`, `mean_model_se`, `rel_se_err`, `coverage`, `power`,
-`mean_ci_width`. Power is reported only for the RD target.
+protocol Section 6.5 metrics plus audit columns:
+
+| column | description |
+|---|---|
+| n_reps_total | rows in the raw CSV for this group |
+| n_reps_ok | replicates whose AIPTW estimator returned status = "ok" |
+| n_reps_failed | `n_reps_total − n_reps_ok` |
+| mean_n_boot_total | average planned bootstrap reps (= `B`) |
+| mean_n_boot_ok | average successful bootstrap reps |
+| mean_n_boot_failed | average failed bootstrap reps |
+| n_ci_ok | replicates with finite CI bounds (denominator for `coverage` and `power`) |
+| truth | analytic Weibull truth |
+| mean_est | mean of `est` across replicates |
+| bias, rel_bias_pct | absolute and relative bias |
+| empirical_sd | sd of `est` across replicates |
+| mean_model_se | mean of bootstrap SE |
+| rel_se_err | `mean_model_se / empirical_sd − 1` |
+| coverage | proportion of `n_ci_ok` CIs containing the truth |
+| power | for `RD` rows only: proportion of CIs excluding 0; NA for `S0`, `S1` |
+| mean_ci_width | average bootstrap CI width |
 
 ## Checkpointing and resume
 

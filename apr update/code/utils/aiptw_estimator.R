@@ -192,7 +192,9 @@ aiptw_bootstrap <- function(surv.df, ps_spec, out_spec,
   boot_long_df %>%
     dplyr::group_by(t, target) %>%
     dplyr::summarise(
-      n_boot_ok = sum(!is.na(val)),
+      n_boot_total  = B,                            # planned bootstrap reps
+      n_boot_ok     = sum(!is.na(val)),
+      n_boot_failed = B - n_boot_ok,
       se        = stats::sd(val, na.rm = TRUE),
       ci_lo     = stats::quantile(val, alpha,     na.rm = TRUE, names = FALSE),
       ci_hi     = stats::quantile(val, 1 - alpha, na.rm = TRUE, names = FALSE),
