@@ -83,9 +83,28 @@ build_scenario_grid <- function(dgms       = c("ph", "delayed", "waning"),
     misspec_patterns_local <- misspec_patterns
   }
 
+  # Fail fast on unknown DGM / misspec names. silently dropping (e.g. via
+  # intersect()) would let typos in --dgm / --misspec produce a smaller or
+  # empty grid while the driver still reports "all scenarios complete".
+  unknown_dgms <- setdiff(dgms, names(dgm_param_files))
+  if (length(unknown_dgms) > 0L) {
+    stop("Unknown dgm name(s): ", paste(unknown_dgms, collapse = ", "),
+         ". Valid: ", paste(names(dgm_param_files), collapse = ", "))
+  }
+  unknown_misspecs <- setdiff(misspecs, names(misspec_patterns_local))
+  if (length(unknown_misspecs) > 0L) {
+    stop("Unknown misspec name(s): ",
+         paste(unknown_misspecs, collapse = ", "),
+         ". Valid: ", paste(names(misspec_patterns_local),
+                             collapse = ", "))
+  }
+  if (length(misspecs) == 0L || length(dgms) == 0L || length(rhos) == 0L) {
+    stop("Empty scenario grid (dgms / misspecs / rhos all required).")
+  }
+
   rows <- expand.grid(
     dgm     = dgms,
-    misspec = intersect(misspecs, names(misspec_patterns_local)),
+    misspec = misspecs,
     rho_L   = rhos,
     stringsAsFactors = FALSE
   )
