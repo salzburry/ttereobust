@@ -312,19 +312,31 @@ main <- function() {
 
     res <- run_one_scenario(sc, dgm_params, opts)
 
-    # Atomic consolidate: write tmp -> rename, then drop the rep_dir so
-    # the summariser sees only completed scenarios. Both rename calls
-    # are checked because file.rename can fail on Windows / networked FS.
+    # Atomic consolidate. Order matters: the summariser uses the
+    # presence of raw_path as the signal that a scenario is complete and
+    # joins it to the truth CSV. Therefore truth must be written BEFORE
+    # raw. Without this ordering an interruption between the raw rename
+    # and the truth write would leave the summariser seeing the scenario
+    # as "done" while the matching truth was missing or stale, producing
+    # NA truth values and NaN performance metrics.
+    tmp_truth <- paste0(truth_path, ".tmp")
+    utils::write.csv(res$truth, tmp_truth, row.names = FALSE)
+    ok_t <- file.rename(tmp_truth, truth_path)
+    if (!isTRUE(ok_t)) {
+      unlink(tmp_truth)
+      stop(sprintf("[consolidate-truth] file.rename failed: %s -> %s",
+                   tmp_truth, truth_path))
+    }
+
     tmp_raw <- paste0(raw_path, ".tmp")
     utils::write.csv(res$reps, tmp_raw, row.names = FALSE)
-    ok <- file.rename(tmp_raw, raw_path)
-    if (!isTRUE(ok)) {
+    ok_r <- file.rename(tmp_raw, raw_path)
+    if (!isTRUE(ok_r)) {
       unlink(tmp_raw)
-      stop(sprintf("[consolidate] file.rename failed: %s -> %s",
+      stop(sprintf("[consolidate-raw] file.rename failed: %s -> %s",
                    tmp_raw, raw_path))
     }
 
-    utils::write.csv(res$truth, truth_path, row.names = FALSE)
     if (dir.exists(res$rep_dir)) {
       unlink(res$rep_dir, recursive = TRUE)
     }
