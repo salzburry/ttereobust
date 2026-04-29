@@ -1,0 +1,45 @@
+## config/default.yml
+##
+## Defaults shared across DGM scenarios. Per-scenario YAML files (ph.yml,
+## delayed.yml, waning.yml) override the dgm/outcome blocks; everything
+## else falls through to here.
+
+seed: 2026
+
+dgm:
+  N: 2500              # protocol Section 6.2
+  N_truth: 500000      # Monte-Carlo population for compute_truth()
+  admin_cens: 10
+
+covariates:
+  Lcovs_linear: 4      # number of L covariates entering linearly
+  Lcovs_sq:     2      # number of L covariates entering with quadratic terms
+  mu: [0, 0, 0, 0, 0, 0, 0, 0]   # length = Lcovs_linear + Lcovs_sq + 2 (W, O)
+  rho_L: 0             # off-diagonal correlation among L's; --rho overrides
+
+exposure:
+  alpha_L: [0.5, 0.4, -0.6, 0.4, 0.5, 0.3]   # coefficients on L1..L6 in the logit
+  alpha_W: 1                                  # coefficient on W in the logit
+
+outcome:
+  hazard_ratios:
+    A:   0.5
+    L:   [0.75, 2.0, 0.5, 0.8, 5.0, 1.5]
+    Lsq: [0.95, 1.5]
+    O:   0.8
+    W:   1.5
+  scaling:
+    A:   1
+    L:   0.1
+    Lsq: 0.1
+    O:   0.1
+    W:   0.1
+  weibull:
+    gamma:  1
+    lambda: 0.2
+
+censoring:
+  lambda_cens: 0.1
+
+evaluation:
+  t_eval: [1, 5, 10]   # protocol Section 6.3

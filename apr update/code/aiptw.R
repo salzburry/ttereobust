@@ -161,6 +161,9 @@ for (k in seq_len(nrow(truth.perf))) {
 
 
 ## ---- Plot ----------------------------------------------------------------
+## Saved to figs/ so it is visible from Rscript as well as RStudio.
+
+dir.create("figs", showWarnings = FALSE)
 
 plot.df <- bind_rows(
   est        %>% transmute(time = t, A = 0L, surv = S0, method = "AIPTW-Cox"),
@@ -175,7 +178,7 @@ plot.df <- bind_rows(
                   labels = c("Control (A=0)", "Treatment (A=1)"))
   )
 
-ggplot(plot.df, aes(x = time, y = surv, colour = method)) +
+p <- ggplot(plot.df, aes(x = time, y = surv, colour = method)) +
   geom_step(linewidth = 0.7) +
   facet_wrap(~A) +
   ylim(0, 1) + xlim(0, admin.cens) +
@@ -184,3 +187,8 @@ ggplot(plot.df, aes(x = time, y = surv, colour = method)) +
   xlab("Time (years)") + ylab("Marginal Survival Probability") +
   ggtitle(sprintf("AIPTW-Cox  (PS = %s | Outcome = %s)",
                   ps.idx, out.idx))
+
+print(p)
+out_path <- file.path("figs", sprintf("aiptw_cox_%s_%s.png", ps.idx, out.idx))
+ggsave(out_path, p, width = 9, height = 5, dpi = 120)
+message("[plot] wrote ", out_path)

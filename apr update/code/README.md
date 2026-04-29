@@ -1,28 +1,46 @@
 # AIPTW simulation harness
 
 Implementation of Section 6 of the Apr 28 methods document
-(`apr update/Updated document Apr 28.pdf`) for the AIPTW arm.
+(`apr update/Updated document Apr 28.pdf`) for the AIPTW arm. Two
+estimator variants are produced side by side from the same simulated
+data:
+
+- **AIPTW-PLR** — discrete-time pooled-logistic outcome model with
+  canonical logit link (`utils/aiptw_estimator.R`).
+- **AIPTW-Cox** — Cox PH outcome model wrapping
+  `riskRegression::ate()` (`utils/aiptw_cox_estimator.R`).
 
 ## File layout
 
 ```
 apr update/code/
+├── config/                  YAML DGM configs (option B, designed around
+│   ├── default.yml          sim_surv_data() args)
+│   ├── ph.yml
+│   ├── delayed.yml
+│   └── waning.yml
 ├── utils/
 │   ├── sim_data.R           Section 6.2 data-generating mechanism
 │   ├── cor_matrix.R         Sigma builder for the correlation sweep
-│   ├── aiptw_estimator.R    Pure AIPTW estimator + bootstrap
+│   ├── aiptw_estimator.R    PLR-AIPTW estimator + bootstrap
+│   ├── aiptw_cox_estimator.R  Cox-AIPTW estimator + bootstrap
 │   ├── compute_truth.R      Analytic Weibull g-formula truth
-│   └── scenarios.R          Scenario grid (DGM x misspec x rho_L)
-├── get_params_ph.R          PH DGM parameters
-├── get_params_delayed.R     Delayed-effect DGM parameters
-├── get_params_waning.R      Waning-effect DGM parameters
+│   ├── scenarios.R          Scenario grid (DGM x misspec x rho_L)
+│   └── load_config.R        YAML -> sim_surv_data params loader
+├── get_params_ph.R          Legacy R parameter files (kept for
+├── get_params_delayed.R     back-compat; YAML configs preferred)
+├── get_params_waning.R
 ├── simulate_aiptw.R         Main replication driver
 ├── summarise_aiptw.R        Performance aggregator
+├── run_aiptw_plr_analysis.R Wrapper script (PLR arm, protocol defaults)
+├── run_aiptw_cox_analysis.R Wrapper script (Cox arm, protocol defaults)
+├── run_pipeline.sh          End-to-end runner (simulate -> summarise -> render)
 ├── aiptw_discrete.R         Interactive demo: AIPTW-PLR across the 5
 │                             main misspec scenarios on one dataset
-│                             (uses utils/aiptw_estimator.R + scenarios.R).
-├── aiptw.R                  Interactive demo: AIPTW-Cox (continuous-time
-│                             outcome variant; not in the harness).
+├── aiptw.R                  Interactive demo: AIPTW-Cox single scenario
+├── reports/
+│   └── AIPTW_report.qmd     Quarto deliverable: HTML report consolidating
+│                             tables + figures from results/summary.csv
 └── results/                 (gitignored) raw replication output and summary
     ├── raw/
     ├── truth/
@@ -50,12 +68,39 @@ Rscript simulate_aiptw.R --R 1 --B 0 \
 Rscript simulate_aiptw.R --R 50 --B 50 \
   --dgm ph --misspec both_correct,miss_W_ps
 
-# Full protocol grid (3 DGMs x 5 misspec x 3 rho = 45 scenarios)
+# Full protocol grid (3 DGMs x 5 misspec x 3 rho = 45 scenarios),
+# AIPTW-PLR arm only
 Rscript simulate_aiptw.R --R 1900 --B 200 --workers 8
+
+# Both arms in one run (PLR + Cox on the same simulated datasets)
+Rscript simulate_aiptw.R --method both --R 1900 --B 200 --workers 8
+
+# YAML config (protocol-grade DGM from config/ph.yml)
+Rscript simulate_aiptw.R --config config/ph.yml --method both \
+                          --R 1900 --B 200 --workers 8
+
+# Convention-aligned wrappers (one per arm)
+Rscript run_aiptw_plr_analysis.R --workers 8
+Rscript run_aiptw_cox_analysis.R --workers 8
 
 # Aggregate into protocol metrics
 Rscript summarise_aiptw.R
+
+# End-to-end (simulate -> summarise -> render Quarto HTML report)
+./run_pipeline.sh
+
+# Render the Quarto report only (after simulate + summarise)
+quarto render reports/AIPTW_report.qmd
 ```
+
+### `--method` and `--config` flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--method aiptw_plr` | yes | discrete-time logit-PLR AIPTW (protocol estimator) |
+| `--method aiptw_cox` | — | Cox PH outcome via `riskRegression::ate()` |
+| `--method both` | — | run both arms on the same datasets; output rows tagged with `method` column |
+| `--config <path>` | — | DGM parameters from a YAML config file. Overrides `get_params_*.R`. |
 
 ## Section -> implementation map
 

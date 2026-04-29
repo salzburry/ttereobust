@@ -65,6 +65,14 @@ main <- function() {
   if (is.null(reps$n_boot_total))  reps$n_boot_total  <- NA_integer_
   if (is.null(reps$n_boot_failed)) reps$n_boot_failed <- NA_integer_
   if (is.null(reps$boot_errors))   reps$boot_errors   <- NA_character_
+  # Method column may be absent on outputs predating the dual-arm
+  # refactor; assume those are PLR.
+  if (is.null(reps$method))        reps$method        <- "aiptw_plr"
+  # IF-based SE / CI columns are populated only by the Cox arm; default
+  # NA on PLR rows for schema parity.
+  if (is.null(reps$if_se))    reps$if_se    <- NA_real_
+  if (is.null(reps$if_ci_lo)) reps$if_ci_lo <- NA_real_
+  if (is.null(reps$if_ci_hi)) reps$if_ci_hi <- NA_real_
 
   truth_long <- bind_rows(
     truth %>% transmute(scenario_id, dgm, misspec, rho_L,
@@ -126,7 +134,7 @@ main <- function() {
     )
 
   summary <- joined %>%
-    dplyr::group_by(scenario_id, dgm, misspec, rho_L, t, target) %>%
+    dplyr::group_by(method, scenario_id, dgm, misspec, rho_L, t, target) %>%
     dplyr::summarise(
       # Replicate-level accounting (denominator audit).
       n_reps_total      = dplyr::n(),
@@ -140,6 +148,7 @@ main <- function() {
       # finite CI. coverage and power below average over these rows; the
       # denominator is stored explicitly so it is auditable.
       n_ci_ok           = sum(!is.na(ci_lo) & !is.na(ci_hi)),
+      n_if_ok           = sum(!is.na(if_ci_lo) & !is.na(if_ci_hi)),
       truth             = mean(truth, na.rm = TRUE),
       mean_est          = mean(est,   na.rm = TRUE),
       bias              = mean_est - truth,
@@ -147,7 +156,12 @@ main <- function() {
       empirical_sd      = stats::sd(est, na.rm = TRUE),
       mean_model_se     = mean(se, na.rm = TRUE),
       rel_se_err        = mean_model_se / empirical_sd - 1,
+      # IF-based SE summary (Cox arm only; NA for PLR).
+      mean_if_se        = mean(if_se, na.rm = TRUE),
+      rel_if_se_err     = mean_if_se / empirical_sd - 1,
       coverage          = mean(ci_lo <= truth & truth <= ci_hi,
+                                na.rm = TRUE),
+      if_coverage       = mean(if_ci_lo <= truth & truth <= if_ci_hi,
                                 na.rm = TRUE),
       # Power: P(CI excludes 0). Meaningful only for the RD target where
       # H0: RD = 0 makes sense. S0 and S1 are survival probabilities far
@@ -168,7 +182,7 @@ main <- function() {
       },
       .groups           = "drop"
     ) %>%
-    dplyr::arrange(dgm, misspec, rho_L, target, t)
+    dplyr::arrange(method, dgm, misspec, rho_L, target, t)
 
   utils::write.csv(summary, opts$out, row.names = FALSE)
   message(sprintf("[wrote] %s  (%d rows)", opts$out, nrow(summary)))
