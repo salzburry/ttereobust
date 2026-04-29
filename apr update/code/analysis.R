@@ -44,8 +44,8 @@ true.df0 <- sim_surv_data(seed = this.seed,
                          coeff.A = coeff.A,
                          coeff.L = coeff.L,
                          coeff.Lsq = coeff.Lsq,
-                         coeff.O = coeff.O, # this will only appear in outcome model
-                         coeff.W = coeff.W, # this will only appear in exposure model
+                         coeff.O = coeff.O, # outcome-only confounder
+                         coeff.W = coeff.W, # confounder of BOTH exposure and outcome (matches sim_data.R DGM)
                          gamma.tte = gamma.tte,
                          lambda.tte = lambda.tte,
                          lambda.cens = lambda.cens,
@@ -64,8 +64,8 @@ true.df1 <- sim_surv_data(seed = this.seed,
                          coeff.A = coeff.A,
                          coeff.L = coeff.L,
                          coeff.Lsq = coeff.Lsq,
-                         coeff.O = coeff.O, # this will only appear in outcome model
-                         coeff.W = coeff.W, # this will only appear in exposure model
+                         coeff.O = coeff.O, # outcome-only confounder
+                         coeff.W = coeff.W, # confounder of BOTH exposure and outcome (matches sim_data.R DGM)
                          gamma.tte = gamma.tte,
                          lambda.tte = lambda.tte,
                          lambda.cens = lambda.cens,
@@ -115,8 +115,8 @@ sim.df <- sim_surv_data(seed = this.seed,
                          coeff.A = coeff.A,
                          coeff.L = coeff.L,
                          coeff.Lsq = coeff.Lsq,
-                         coeff.O = coeff.O, # this will only appear in outcome model
-                         coeff.W = coeff.W, # this will only appear in exposure model
+                         coeff.O = coeff.O, # outcome-only confounder
+                         coeff.W = coeff.W, # confounder of BOTH exposure and outcome (matches sim_data.R DGM)
                          gamma.tte = gamma.tte,
                          lambda.tte = lambda.tte,
                          lambda.cens = lambda.cens,
@@ -130,7 +130,7 @@ surv.df <- sim.df$data %>%
 # Using one shared index (as previously) changes BOTH models together and does
 # not represent the protocol's "misspecify one model only" scenarios.
 ps.index  <- 1   # index into exposure.covs: 1=correct, 2=no W, 3=wrong form, 4=heavy
-out.index <- 1   # index into outcome.covs:  1=correct, 2=no O/W, 3=wrong form, 4=heavy
+out.index <- 1   # index into outcome.covs:  1=correct, 2=no O,  3=wrong form, 4=heavy
 
 iptw.formula <- paste("A", exposure.covs[ps.index], sep = " ~ ")
  
