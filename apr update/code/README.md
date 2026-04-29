@@ -90,8 +90,10 @@ Rscript summarise_aiptw.R
 | se | bootstrap SE |
 | ci_lo, ci_hi | 95% percentile bootstrap CI |
 
-`results/truth/<scenario_id>.csv` — one row per (t, target) holding the
-analytic Weibull truth.
+`results/truth/<scenario_id>.csv` — one row per `t`, with `S0`, `S1`, and
+`RD` as separate columns plus the scenario keys (`scenario_id`, `dgm`,
+`misspec`, `rho_L`). The summariser pivots this into long form
+(`t, target, truth`) before joining to the raw replicate output.
 
 `results/summary.csv` — one row per (scenario, t, target) holding the
 protocol Section 6.5 metrics plus audit columns:

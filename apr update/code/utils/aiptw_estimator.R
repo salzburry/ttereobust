@@ -185,19 +185,25 @@ aiptw_bootstrap <- function(surv.df, ps_spec, out_spec,
       se            = NA_real_,
       ci_lo         = NA_real_,
       ci_hi         = NA_real_,
+      boot_errors   = NA_character_,
       stringsAsFactors = FALSE
     ))
   }
 
   # Each bootstrap returns a (length(t_eval) x 3) data frame; stack into
   # a long table keyed by (b, t, target).
-  boot_long <- vector("list", B)
+  boot_long  <- vector("list", B)
+  boot_errs  <- character(0)            # collect distinct error messages
   for (b in seq_len(B)) {
     idx     <- sample.int(N, N, replace = TRUE)
     boot.df <- surv.df[idx, ]
     boot.df$id <- seq_len(N)            # re-id so survSplit etc. behave
     est <- aiptw_estimate(boot.df, ps_spec, out_spec, t_eval,
                           admin.cens, rescale_time, ps_trim)
+    if (any(est$status == "error")) {
+      msg <- est$error_msg[1]
+      if (!is.na(msg) && !msg %in% boot_errs) boot_errs <- c(boot_errs, msg)
+    }
     boot_long[[b]] <- data.frame(
       b      = b,
       t      = rep(est$t, 3),
@@ -206,6 +212,8 @@ aiptw_bootstrap <- function(surv.df, ps_spec, out_spec,
     )
   }
   boot_long_df <- do.call(rbind, boot_long)
+  boot_err_str <- if (length(boot_errs) == 0L) NA_character_ else
+                   paste(boot_errs, collapse = " | ")
 
   # Guard against empty / single-value bootstrap distributions:
   #   - sd() on < 2 non-NA values returns NA with a warning.
@@ -234,6 +242,11 @@ aiptw_bootstrap <- function(surv.df, ps_spec, out_spec,
       se        = safe_sd(val),
       ci_lo     = safe_q(val, alpha),
       ci_hi     = safe_q(val, 1 - alpha),
-      .groups   = "drop"
+      # Distinct error messages from any failed bootstrap fits, joined
+      # with " | ". NA when no fit failed. Avoids storing a per-b
+      # message column (which would multiply rows or carry NULLs) while
+      # still letting downstream readers diagnose what went wrong.
+      boot_errors   = boot_err_str,
+      .groups       = "drop"
     )
 }

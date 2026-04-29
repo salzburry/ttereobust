@@ -9,7 +9,6 @@ library(flexsurv)      # provides flexsurvspline() and standsurv()
 library(adjustedCurves)
 library(MASS)
 library(purrr)
-library(gfoRmula)
 library(broom)         # tidy()
 
 source("utils/sim_data.R")
@@ -170,14 +169,21 @@ iptw.cox <- coxph(Surv(eventtime, event) ~ A,
 # returns one conditional survival per subject at that subject's observed
 # event time, which is not a marginal S(t|A) curve and is not comparable
 # with AIPTW or the protocol targets at t = 1, 5, 10.
-cox.t.grid    <- seq(0, admin.cens, 0.1)
-iptw.cox.fit  <- survfit(iptw.cox, newdata = data.frame(A = c(0, 1)))
-iptw.cox.summ <- summary(iptw.cox.fit, times = cox.t.grid, extend = TRUE)
+cox.t.grid <- seq(0, admin.cens, 0.1)
+# Two single-curve survfit calls instead of one multi-newdata call.
+# summary.survfit() exposes $surv differently depending on the number of
+# curves and the time grid; with two newdata rows it can be either a
+# matrix or a vector pasted end-to-end. Splitting per arm avoids that
+# ambiguity.
+iptw.cox.fit0 <- survfit(iptw.cox, newdata = data.frame(A = 0))
+iptw.cox.fit1 <- survfit(iptw.cox, newdata = data.frame(A = 1))
+s0 <- summary(iptw.cox.fit0, times = cox.t.grid, extend = TRUE)$surv
+s1 <- summary(iptw.cox.fit1, times = cox.t.grid, extend = TRUE)$surv
 
 cox.surv.df <- data.frame(
   time   = rep(cox.t.grid, 2),
   A      = rep(c(0, 1), each = length(cox.t.grid)),
-  surv   = c(iptw.cox.summ$surv[, 1], iptw.cox.summ$surv[, 2]),
+  surv   = c(s0, s1),
   method = paste0("IPTW Cox (", exposure.covs[ps.index], ")")
 )
  
@@ -234,14 +240,20 @@ plr.surv.df$surv[plr.surv.df$A==0] <- cumprod(plr.surv.df$surv_interval[plr.surv
 plr.surv.df$surv[plr.surv.df$A==1] <- cumprod(plr.surv.df$surv_interval[plr.surv.df$A==1]) # Use cumprod to get the cumulative survival curve
  
 interval_mapping <- data.frame(
-  time_period = 1:(length(cutpoints)),
-  start_time = c(0, cutpoints[-length(cutpoints)]),
-  time = cutpoints
+  time_period = seq_along(interval_ends),
+  start_time  = c(0, interval_ends[-length(interval_ends)]),
+  time        = interval_ends
 )
-plr.surv.df <- left_join(plr.surv.df %>%
-                           add_row(data.frame(time_period = c(1,1), surv = c(1,1), A = c(0,1))),
-                         interval_mapping %>% dplyr::select(time_period, time), by = c("time_period")) %>%
-  mutate(method = paste0("IPTW Discrete (", exposure.covs[ps.index],")")) %>%
+# Map period -> calendar time first, then prepend an explicit S(0) = 1
+# row at time = 0. Adding the boundary row via time_period = 1 (as the
+# previous code did) would map t = 0 onto interval_ends[1] = 0.25,
+# duplicating the first interval endpoint and shifting the curve.
+plr.surv.df <- plr.surv.df %>%
+  left_join(interval_mapping %>% dplyr::select(time_period, time),
+            by = "time_period") %>%
+  bind_rows(data.frame(time_period = NA_integer_, surv = 1,
+                        A = c(0L, 1L), time = 0)) %>%
+  mutate(method = paste0("IPTW Discrete (", exposure.covs[ps.index], ")")) %>%
   dplyr::select(time, A, surv, method)
  
 ## Fit a super learner ??
@@ -301,7 +313,7 @@ fpm.adjsurv.df <- standsurv(cond.fpm.nph.fit, type="survival",
  
 surv.long.df <- survSplit(Surv(eventtime, event) ~ .,
                             data = surv.df,
-                            cut = cutpoints,
+                            cut = split_cuts,           # interior cuts only
                             episode = "time_period")
  
 cond.plr.mod <- glm(as.formula(glm.model.formula),
@@ -448,7 +460,7 @@ ggplot() +
 ggplot() +
   geom_step(data=rbind(cox.surv.df, weib.surv.df, fpm.surv.df, plr.surv.df,
                        cox.adjsurv.df, fpm.adjsurv.df, plr.adjsurv.df,
-                       cox.drsurv.df, plr.drsurv.df),
+                       cox.drsurv.df, fpm.drsurv.df, plr.drsurv.df),
             aes(x = time, y = surv, color=method)) +
   facet_wrap(~A) +
   ylim(0,1) + xlim(0,admin.cens) +

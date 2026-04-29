@@ -64,6 +64,7 @@ main <- function() {
   if (is.null(reps$n_boot_ok))     reps$n_boot_ok     <- NA_integer_
   if (is.null(reps$n_boot_total))  reps$n_boot_total  <- NA_integer_
   if (is.null(reps$n_boot_failed)) reps$n_boot_failed <- NA_integer_
+  if (is.null(reps$boot_errors))   reps$boot_errors   <- NA_character_
 
   truth_long <- bind_rows(
     truth %>% transmute(scenario_id, dgm, misspec, rho_L,
@@ -157,6 +158,14 @@ main <- function() {
         NA_real_
       ),
       mean_ci_width     = mean(ci_hi - ci_lo, na.rm = TRUE),
+      # Distinct bootstrap error messages observed across replicates,
+      # joined with " || " across reps. Lets a high n_reps_failed or
+      # mean_n_boot_failed be diagnosed without re-running.
+      boot_errors_seen  = {
+        msgs <- unique(stats::na.omit(boot_errors))
+        if (length(msgs) == 0L) NA_character_ else
+          paste(msgs, collapse = " || ")
+      },
       .groups           = "drop"
     ) %>%
     dplyr::arrange(dgm, misspec, rho_L, target, t)
