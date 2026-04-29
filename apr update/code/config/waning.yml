@@ -1,0 +1,43 @@
+## config/waning.yml
+##
+## Treatment-waning DGM (non-PH). Mirrors get_params_waning.R.
+
+seed: 2026
+
+dgm:
+  N: 2500
+  N_truth: 500000
+  admin_cens: 10
+
+covariates:
+  Lcovs_linear: 4
+  Lcovs_sq:     2
+  mu: [0, 0, 0, 0, 0, 0, 0, 0]
+  rho_L: 0
+
+exposure:
+  alpha_L: [0.5, 0.4, -0.6, 0.4, 0.5, 0.3]
+  alpha_W: 1
+
+outcome:
+  hazard_ratios:
+    A:   0.5
+    L:   [0.75, 2.0, 0.5, 0.8, 5.0, 1.5]
+    Lsq: [0.95, 1.5]
+    O:   0.8
+    W:   1.5
+  scaling:
+    A:   1
+    L:   1            # no scaling; full log-HRs
+    Lsq: 1
+    O:   1
+    W:   1
+  weibull:
+    gamma:  1.5
+    lambda: 0.9
+
+censoring:
+  lambda_cens: 0.1
+
+evaluation:
+  t_eval: [1, 5, 10]

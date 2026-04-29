@@ -1,0 +1,270 @@
+---
+title: "AIPTW Simulation Study — PLR vs Cox Outcome Model"
+subtitle: "Apr 28 protocol, Section 6"
+author: "AIPTW workstream"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    df-print: paged
+    embed-resources: true
+    fig-width: 9
+    fig-height: 5
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  results_dir: "../results"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+})
+
+# Paths -- params$results_dir is relative to the .qmd location.
+results_dir <- params$results_dir
+summary_path <- file.path(results_dir, "summary.csv")
+raw_dir      <- file.path(results_dir, "raw")
+truth_dir    <- file.path(results_dir, "truth")
+
+if (!file.exists(summary_path)) {
+  stop("Summary CSV not found at ", summary_path,
+       ". Run summarise_aiptw.R first.")
+}
+
+summary_df <- read.csv(summary_path, stringsAsFactors = FALSE)
+raw_files  <- list.files(raw_dir, pattern = "\\.csv$", full.names = TRUE,
+                          recursive = FALSE)
+raw_df     <- do.call(rbind, lapply(raw_files, read.csv,
+                                     stringsAsFactors = FALSE))
+truth_files <- list.files(truth_dir, pattern = "\\.csv$", full.names = TRUE,
+                           recursive = FALSE)
+truth_df    <- do.call(rbind, lapply(truth_files, read.csv,
+                                      stringsAsFactors = FALSE))
+
+# Defaults for older outputs without the method column.
+if (is.null(raw_df$method))     raw_df$method     <- "aiptw_plr"
+if (is.null(summary_df$method)) summary_df$method <- "aiptw_plr"
+```
+
+# Overview
+
+This report consolidates the AIPTW simulation results from
+`results/raw/<scenario>.csv` and the protocol metrics in
+`results/summary.csv`. It covers up to two AIPTW variants depending on
+how `simulate_aiptw.R` was invoked:
+
+- **`aiptw_plr`** — discrete-time pooled-logistic outcome model with
+  canonical logit link; the protocol-faithful AIPTW formulation per
+  the methods document Section 4.2.2.
+- **`aiptw_cox`** — Cox PH outcome model wrapping
+  `riskRegression::ate()`. Same propensity-score model, different
+  outcome specification.
+
+```{r overview-table}
+overview <- summary_df %>%
+  group_by(method, dgm) %>%
+  summarise(
+    n_scenarios = n_distinct(scenario_id),
+    n_replicates = mean(n_reps_total),
+    n_failed     = sum(n_reps_failed),
+    .groups = "drop"
+  )
+
+kable(overview, caption = "Run scope by method and DGM",
+      digits = 0)
+```
+
+# Section 6.5 — Performance metrics
+
+The Apr 28 protocol's primary deliverable. One row per
+`(method, scenario, t, target)`. RD power is reported only for the RD
+target; coverage and SE error are reported for all three targets.
+
+```{r perf-table}
+perf <- summary_df %>%
+  filter(t == max(summary_df$t)) %>%
+  select(method, dgm, misspec, rho_L, target,
+         truth, mean_est, rel_bias_pct,
+         empirical_sd, mean_model_se, rel_se_err,
+         coverage, power, n_reps_ok)
+
+kable(perf, digits = 4,
+      caption = sprintf("Performance at t = %g (largest evaluation time)",
+                        max(summary_df$t)))
+```
+
+# Section 7 — Bias and coverage by scenario
+
+```{r bias-fig, fig.cap="Relative bias (%) at each evaluation time, by misspecification scenario."}
+bias_plot <- summary_df %>%
+  filter(target %in% c("S0", "S1", "RD")) %>%
+  ggplot(aes(x = factor(t), y = rel_bias_pct,
+             fill = method)) +
+  geom_col(position = position_dodge(width = 0.9), width = 0.85) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_grid(target ~ dgm + misspec, scales = "free_y") +
+  theme_classic(base_size = 9) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 7),
+        strip.text  = element_text(size = 7)) +
+  labs(x = "t (years)", y = "Relative bias (%)",
+       fill = "Method")
+
+bias_plot
+```
+
+```{r coverage-fig, fig.cap="Coverage (proportion of 95% bootstrap CIs containing truth)."}
+cov_plot <- summary_df %>%
+  ggplot(aes(x = factor(t), y = coverage,
+             fill = method)) +
+  geom_col(position = position_dodge(width = 0.9), width = 0.85) +
+  geom_hline(yintercept = 0.95, linetype = "dashed", colour = "red") +
+  facet_grid(target ~ dgm + misspec, scales = "free_y") +
+  ylim(0, 1) +
+  theme_classic(base_size = 9) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 7),
+        strip.text  = element_text(size = 7)) +
+  labs(x = "t (years)", y = "Coverage",
+       fill = "Method")
+
+cov_plot
+```
+
+# Survival curves vs analytic Weibull truth
+
+For each scenario, the figure overlays the replicate-mean estimated
+S^a(t) curves (one per method) on the analytic Weibull truth. With the
+protocol-grade R = 1900 these mean curves should overlap the truth
+under the doubly-robust scenarios.
+
+```{r curves-prep}
+# Replicate-mean S(t) curves at each evaluation time (protocol grid only).
+curve_df <- raw_df %>%
+  filter(target %in% c("S0", "S1"), status == "ok") %>%
+  group_by(method, scenario_id, dgm, misspec, rho_L, t, target) %>%
+  summarise(mean_est = mean(est, na.rm = TRUE), .groups = "drop") %>%
+  rename(A = target) %>%
+  mutate(A = ifelse(A == "S0", 0L, 1L))
+
+truth_long <- bind_rows(
+  truth_df %>% transmute(scenario_id, dgm, misspec, rho_L, t,
+                          A = 0L, surv = S0),
+  truth_df %>% transmute(scenario_id, dgm, misspec, rho_L, t,
+                          A = 1L, surv = S1)
+) %>%
+  mutate(method = "True Weibull")
+
+curves <- bind_rows(
+  curve_df %>% transmute(method, scenario_id, dgm, misspec, rho_L,
+                          t, A, surv = mean_est),
+  truth_long
+) %>%
+  mutate(A = factor(A, levels = c(0L, 1L),
+                    labels = c("Control (A=0)", "Treatment (A=1)")))
+```
+
+```{r curves-fig, fig.cap="Replicate-mean S^a(t) by method (PLR / Cox / Truth), faceted by scenario.", fig.height=8}
+curves %>%
+  ggplot(aes(x = t, y = surv, colour = method, linetype = method)) +
+  geom_line(linewidth = 0.6) + geom_point(size = 1) +
+  facet_grid(misspec ~ dgm + A) +
+  ylim(0, 1) +
+  theme_classic(base_size = 9) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 7)) +
+  labs(x = "t (years)", y = "Marginal Survival Probability")
+```
+
+# PLR vs Cox AIPTW — head-to-head
+
+Side-by-side comparison of the two AIPTW outcome-model choices on the
+same scenarios.
+
+```{r plr-vs-cox}
+if (length(unique(summary_df$method)) >= 2L) {
+  pivot_cols <- c("rel_bias_pct", "coverage", "mean_ci_width")
+  comp <- summary_df %>%
+    select(method, dgm, misspec, rho_L, t, target,
+           rel_bias_pct, coverage, mean_ci_width) %>%
+    pivot_wider(names_from = method,
+                values_from = all_of(pivot_cols))
+  kable(comp, digits = 4,
+        caption = "Per-cell comparison: PLR vs Cox AIPTW")
+} else {
+  cat("Only one AIPTW variant present in this run (",
+      paste(unique(summary_df$method), collapse = ", "),
+      "). Re-run with --method both to populate this table.")
+}
+```
+
+# Bootstrap vs influence-function inference (Cox arm only)
+
+```{r boot-vs-if}
+cox_rows <- summary_df %>%
+  filter(method == "aiptw_cox", n_if_ok > 0)
+
+if (nrow(cox_rows) > 0L) {
+  cox_compare <- cox_rows %>%
+    select(dgm, misspec, rho_L, t, target,
+           empirical_sd,
+           mean_model_se, rel_se_err, coverage,
+           mean_if_se, rel_if_se_err, if_coverage)
+  kable(cox_compare, digits = 4,
+        caption = "Cox-AIPTW: bootstrap-based vs IF-based SE / coverage")
+} else {
+  cat("No Cox-AIPTW rows with IF-based SEs available.")
+}
+```
+
+# Failure audit
+
+```{r failure-audit}
+fail_df <- summary_df %>%
+  filter(n_reps_failed > 0 |
+         (!is.na(mean_n_boot_failed) & mean_n_boot_failed > 0))
+
+if (nrow(fail_df) > 0L) {
+  kable(
+    fail_df %>%
+      select(method, scenario_id, t, target,
+             n_reps_total, n_reps_ok, n_reps_failed,
+             mean_n_boot_failed, boot_errors_seen),
+    digits = 1,
+    caption = "Cells with non-zero replicate or bootstrap failure"
+  )
+} else {
+  cat("No replicate or bootstrap failures detected.")
+}
+```
+
+# Run reproduction
+
+```{r repro}
+cat("To reproduce this report:\n\n")
+cat("```bash\n")
+cat("# AIPTW-PLR arm\n")
+cat("Rscript run_aiptw_plr_analysis.R --R 1900 --B 200 --workers 16\n\n")
+cat("# AIPTW-Cox arm\n")
+cat("Rscript run_aiptw_cox_analysis.R --R 1900 --B 200 --workers 16\n\n")
+cat("# Aggregate\n")
+cat("Rscript summarise_aiptw.R\n\n")
+cat("# This report\n")
+cat("quarto render reports/AIPTW_report.qmd\n")
+cat("```\n")
+```
+
+# Session info
+
+```{r session}
+sessionInfo()
+```

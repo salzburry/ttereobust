@@ -53,6 +53,9 @@ source(file.path(CODE_DIR, "utils", "cor_matrix.R"))
 source(file.path(CODE_DIR, "utils", "aiptw_estimator.R"))
 source(file.path(CODE_DIR, "utils", "compute_truth.R"))
 source(file.path(CODE_DIR, "utils", "scenarios.R"))
+source(file.path(CODE_DIR, "utils", "load_config.R"))
+# AIPTW-Cox arm sourced lazily inside main() so a PLR-only run does
+# not require riskRegression to be installed.
 
 
 ## ---- CLI argument parser ---------------------------------------------------
@@ -70,7 +73,9 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
     rho          = NULL,           # NULL = all (0, 0.25, 0.75)
     include_heavy = FALSE,
     n_workers    = 1L,             # 1 = sequential
-    overwrite    = FALSE
+    overwrite    = FALSE,
+    method       = "aiptw_plr",    # "aiptw_plr", "aiptw_cox", or "both"
+    config       = NULL            # optional YAML config path
   )
 
   i <- 1L
@@ -89,6 +94,8 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
       "--workers"       = { defaults$n_workers <- as.integer(val); i <- i + 2L },
       "--include-heavy" = { defaults$include_heavy <- TRUE; i <- i + 1L },
       "--overwrite"     = { defaults$overwrite <- TRUE; i <- i + 1L },
+      "--method"        = { defaults$method <- val; i <- i + 2L },
+      "--config"        = { defaults$config <- val; i <- i + 2L },
       { stop("Unknown CLI argument: ", a) }
     )
   }
@@ -101,7 +108,28 @@ parse_cli_args <- function(args = commandArgs(trailingOnly = TRUE)) {
          defaults$rescale_time)
   }
 
+  # Validate --method.
+  if (!defaults$method %in% c("aiptw_plr", "aiptw_cox", "both")) {
+    stop("--method must be one of 'aiptw_plr', 'aiptw_cox', 'both'; got ",
+         defaults$method)
+  }
+
   defaults
+}
+
+
+## Methods to run for this invocation.
+methods_to_run <- function(method_arg) {
+  if (method_arg == "both") c("aiptw_plr", "aiptw_cox") else method_arg
+}
+
+
+## Lazy-load the AIPTW-Cox estimator only when needed (riskRegression is a
+## heavy dependency we do not want to require for a PLR-only run).
+ensure_cox_loaded <- function() {
+  if (!exists("aiptw_cox_estimate", mode = "function")) {
+    source(file.path(CODE_DIR, "utils", "aiptw_cox_estimator.R"))
+  }
 }
 
 
@@ -248,11 +276,17 @@ run_one_scenario <- function(scenario_row, dgm_params, opts,
                   truth$S1[truth$t == max(opts$t_eval)],
                   truth$RD[truth$t == max(opts$t_eval)]))
 
-  # Per-replication function (closure over opts and scenario)
+  # Per-replication function (closure over opts, dgm_params, scenario).
+  #
+  # Runs each method requested by --method on the SAME simulated dataset
+  # (so PLR and Cox arms share Monte-Carlo noise -- their differences
+  # reflect only estimator choice, not data variation). Output rows are
+  # tagged with a method column.
+  active_methods <- methods_to_run(opts$method)
+
   rep_fn <- function(r) {
     rep_path <- file.path(rep_dir, sprintf("rep_%05d.csv", r))
     if (file.exists(rep_path)) {
-      # Resume: rep already completed in a previous invocation.
       return(utils::read.csv(rep_path, stringsAsFactors = FALSE))
     }
 
@@ -278,44 +312,79 @@ run_one_scenario <- function(scenario_row, dgm_params, opts,
     )
     surv.df <- sim$data
 
-    est <- aiptw_estimate(
-      surv.df, scenario_row$ps_spec, scenario_row$out_spec,
-      t_eval       = opts$t_eval,
-      admin.cens   = dgm_params$admin.cens,
-      rescale_time = opts$rescale_time
-    )
+    rep_rows <- vector("list", length(active_methods))
 
-    boot <- aiptw_bootstrap(
-      surv.df, scenario_row$ps_spec, scenario_row$out_spec,
-      t_eval       = opts$t_eval,
-      admin.cens   = dgm_params$admin.cens,
-      rescale_time = opts$rescale_time,
-      B            = opts$B
-    )
+    for (mi in seq_along(active_methods)) {
+      m <- active_methods[mi]
 
-    # Long-format with status carried through.
-    est_long <- dplyr::bind_rows(
-      data.frame(t = est$t, target = "S0", est = est$S0,
-                 status = est$status, error_msg = est$error_msg,
-                 stringsAsFactors = FALSE),
-      data.frame(t = est$t, target = "S1", est = est$S1,
-                 status = est$status, error_msg = est$error_msg,
-                 stringsAsFactors = FALSE),
-      data.frame(t = est$t, target = "RD", est = est$RD,
-                 status = est$status, error_msg = est$error_msg,
-                 stringsAsFactors = FALSE)
-    )
+      if (m == "aiptw_plr") {
+        est <- aiptw_estimate(
+          surv.df, scenario_row$ps_spec, scenario_row$out_spec,
+          t_eval = opts$t_eval, admin.cens = dgm_params$admin.cens,
+          rescale_time = opts$rescale_time
+        )
+        boot <- aiptw_bootstrap(
+          surv.df, scenario_row$ps_spec, scenario_row$out_spec,
+          t_eval = opts$t_eval, admin.cens = dgm_params$admin.cens,
+          rescale_time = opts$rescale_time, B = opts$B
+        )
+        # IF-based SE is not produced for the PLR arm; emit NA columns for
+        # schema parity with the Cox arm.
+        if_se_S0 <- NA_real_; if_se_S1 <- NA_real_; if_se_RD <- NA_real_
+        if_lo_S0 <- NA_real_; if_hi_S0 <- NA_real_
+        if_lo_S1 <- NA_real_; if_hi_S1 <- NA_real_
+        if_lo_RD <- NA_real_; if_hi_RD <- NA_real_
 
-    rep_df <- dplyr::left_join(est_long, boot, by = c("t", "target"))
-    rep_df$rep         <- r
-    rep_df$scenario_id <- scenario_row$scenario_id
-    rep_df$dgm         <- scenario_row$dgm
-    rep_df$misspec     <- scenario_row$misspec
-    rep_df$rho_L       <- scenario_row$rho_L
+      } else if (m == "aiptw_cox") {
+        est <- aiptw_cox_estimate(
+          surv.df, scenario_row$ps_spec, scenario_row$out_spec,
+          t_eval = opts$t_eval, admin.cens = dgm_params$admin.cens
+        )
+        boot <- aiptw_cox_bootstrap(
+          surv.df, scenario_row$ps_spec, scenario_row$out_spec,
+          t_eval = opts$t_eval, admin.cens = dgm_params$admin.cens,
+          B = opts$B
+        )
+      } else stop("unknown method: ", m)
 
-    # Atomic checkpoint: write to tmp, rename. file.rename can fail on
-    # Windows / networked storage if the target is locked or already
-    # exists, so the return value must be checked.
+      # Build the long-format rep_rows for this method. The per-row IF
+      # columns come from the wide est data frame (Cox only); for PLR
+      # they are NA-filled to keep one schema across both arms.
+      method_long <- dplyr::bind_rows(
+        data.frame(t = est$t, target = "S0", est = est$S0,
+                   status = est$status, error_msg = est$error_msg,
+                   if_se = if (m == "aiptw_cox") est$S0_if_se else NA_real_,
+                   if_ci_lo = if (m == "aiptw_cox") est$S0_if_ci_lo else NA_real_,
+                   if_ci_hi = if (m == "aiptw_cox") est$S0_if_ci_hi else NA_real_,
+                   stringsAsFactors = FALSE),
+        data.frame(t = est$t, target = "S1", est = est$S1,
+                   status = est$status, error_msg = est$error_msg,
+                   if_se = if (m == "aiptw_cox") est$S1_if_se else NA_real_,
+                   if_ci_lo = if (m == "aiptw_cox") est$S1_if_ci_lo else NA_real_,
+                   if_ci_hi = if (m == "aiptw_cox") est$S1_if_ci_hi else NA_real_,
+                   stringsAsFactors = FALSE),
+        data.frame(t = est$t, target = "RD", est = est$RD,
+                   status = est$status, error_msg = est$error_msg,
+                   if_se = if (m == "aiptw_cox") est$RD_if_se else NA_real_,
+                   if_ci_lo = if (m == "aiptw_cox") est$RD_if_ci_lo else NA_real_,
+                   if_ci_hi = if (m == "aiptw_cox") est$RD_if_ci_hi else NA_real_,
+                   stringsAsFactors = FALSE)
+      )
+      method_long <- dplyr::left_join(method_long, boot,
+                                       by = c("t", "target"))
+      method_long$method      <- m
+      method_long$rep         <- r
+      method_long$scenario_id <- scenario_row$scenario_id
+      method_long$dgm         <- scenario_row$dgm
+      method_long$misspec     <- scenario_row$misspec
+      method_long$rho_L       <- scenario_row$rho_L
+      rep_rows[[mi]] <- method_long
+    }
+
+    rep_df <- do.call(rbind, rep_rows)
+
+    # Atomic checkpoint: tmp -> rename. Checked because file.rename can
+    # fail on Windows / networked storage.
     tmp_path <- paste0(rep_path, ".tmp")
     utils::write.csv(rep_df, tmp_path, row.names = FALSE)
     ok <- file.rename(tmp_path, rep_path)
@@ -357,9 +426,11 @@ run_one_scenario <- function(scenario_row, dgm_params, opts,
 
 main <- function() {
   opts <- parse_cli_args()
-  # Capture the actual worker count after parallelly capping, otherwise
-  # main() would still pass the requested count to run_replications and
-  # take the silent furrr branch on a 1-CPU pod where the cap kicked in.
+
+  # Lazy-load the Cox arm dependencies if --method needs them.
+  if (opts$method %in% c("aiptw_cox", "both")) ensure_cox_loaded()
+
+  # Capture the actual worker count after parallelly capping.
   opts$n_workers <- set_parallel_plan(opts$n_workers)
 
   grid <- build_scenario_grid(
@@ -369,24 +440,34 @@ main <- function() {
     include_heavy = opts$include_heavy
   )
 
-  message(sprintf("[grid] %d scenarios x R = %d reps x B = %d bootstraps",
-                  nrow(grid), opts$R, opts$B))
+  message(sprintf(
+    "[grid] %d scenarios x R = %d reps x B = %d bootstraps  |  method = %s",
+    nrow(grid), opts$R, opts$B, opts$method
+  ))
+  if (!is.null(opts$config)) {
+    message("[config] loading DGM params from ", opts$config)
+  }
 
-  # DGM params are per-DGM (not per-rho); cache to avoid re-sourcing
+  # DGM params are per-DGM (not per-rho); cache to avoid re-sourcing.
+  # When --config is supplied, the YAML loader replaces the legacy
+  # get_params_*.R lookup so all DGMs in --dgm draw from the same YAML
+  # (or the per-DGM YAML files in config/).
   dgm_cache   <- new.env(parent = emptyenv())
   truth_cache <- new.env(parent = emptyenv())   # keyed by "<dgm>__<rho_L>"
 
   # Config that affects raw output content. Stored beside each scenario
   # CSV as a .cfg sidecar so we can detect and refuse to mix runs from
   # different settings (e.g. resuming a smoke run as a protocol run, or
-  # changing --rescale-time / --N / --base-seed mid-run, which would
-  # silently combine incompatible rows).
+  # changing --rescale-time / --N / --base-seed / --method mid-run).
   current_cfg <- list(
     N            = opts$N,
     R            = opts$R,
     B            = opts$B,
     rescale_time = opts$rescale_time,
-    base_seed    = opts$base_seed
+    base_seed    = opts$base_seed,
+    method       = opts$method,
+    config       = if (is.null(opts$config)) "" else
+                     normalizePath(opts$config, mustWork = FALSE)
   )
 
   for (i in seq_len(nrow(grid))) {
@@ -448,8 +529,21 @@ main <- function() {
     dput(current_cfg, file = cfg_path)
 
     if (!exists(sc$dgm, envir = dgm_cache, inherits = FALSE)) {
-      assign(sc$dgm, load_dgm_params(sc$dgm, code_dir = CODE_DIR),
-             envir = dgm_cache)
+      # Three sources for the DGM parameter list, in priority:
+      #   (1) --config <yml>: explicit path passed on the CLI
+      #   (2) config/<dgm>.yml: per-DGM YAML in the config directory
+      #   (3) get_params_<dgm>.R: legacy R parameter file (back-compat)
+      yaml_default <- file.path(CODE_DIR, "config",
+                                 paste0(sc$dgm, ".yml"))
+      yaml_path <- if (!is.null(opts$config)) opts$config else
+                    if (file.exists(yaml_default)) yaml_default else NULL
+
+      if (!is.null(yaml_path)) {
+        assign(sc$dgm, read_dgm_yaml(yaml_path), envir = dgm_cache)
+      } else {
+        assign(sc$dgm, load_dgm_params(sc$dgm, code_dir = CODE_DIR),
+               envir = dgm_cache)
+      }
     }
     dgm_params <- get(sc$dgm, envir = dgm_cache)
 

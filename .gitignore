@@ -5,6 +5,12 @@ apr update/code/results/
 # Plot output from the demo scripts (regenerable).
 apr update/code/figs/
 
+# Quarto rendered output (regenerable from .qmd).
+apr update/code/reports/*.html
+apr update/code/reports/*.pdf
+apr update/code/reports/*_files/
+apr update/code/reports/.quarto/
+
 ### AL ###
 #Template for AL projects for Dynamics 365 Business Central
 #launch.json folder
